@@ -1,0 +1,50 @@
+# --- the runtime -------------------------------------------------------------
+# bootstrap.ps1 downloads ~3.4 GB of third-party binaries here (mpv,
+# VapourSynth, AviSynth+, MVTools, TensorRT, RIFE model weights). None of it is
+# ours to redistribute, and it is reproducible from the manifest, so it never
+# goes in the repository.
+runtime/
+
+# --- test and sample media ----------------------------------------------------
+testmedia/
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.m2ts
+*.webm
+*.y4m
+
+# --- generated at run time ----------------------------------------------------
+# Filter scripts are regenerated per file; the .reg is a machine-local backup of
+# MPC-HC's filter list.
+*.vpy
+*.avs
+*.reg
+PROOF.txt
+*.log
+
+# Saved profiles are per-machine tuning, not project files. The presets live in
+# twixt/profiles.py.
+profiles/*.json
+
+# --- python -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- editors and OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
