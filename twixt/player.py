@@ -24,6 +24,10 @@ from .profiles import Profile
 
 SCRIPT_DIR = Path(tempfile.gettempdir()) / "twixt"
 
+# Ships with the package rather than being written to temp: it never varies
+# per file, and mpv holds it open for the whole session.
+OSD_SCRIPT = Path(__file__).resolve().parent / "osd" / "twixt-fps.lua"
+
 
 @dataclass
 class Session:
@@ -148,9 +152,15 @@ def build_args(source: detect.SourceInfo, profile: Profile, script: Path,
 
         f"--vf={_vf_arg(script, profile)}",
 
-        # The vapoursynth filter needs frames in system memory, so hardware
-        # decoding has to stay off. Decoding is cheap next to interpolation.
-        "--hwdec=no",
+        # The vapoursynth filter needs frames in system memory -- but that only
+        # rules out *zero-copy* hardware decoding, not hardware decoding. The
+        # "-copy" hwdecs run the decoder on the GPU and read the frames back to
+        # system RAM, which is exactly what the filter wants. Decoding is only
+        # cheap next to interpolation for h264; a 1440p AV1 or 10-bit HEVC
+        # stream costs several cores in software, and those are the same cores
+        # mvtools wants. Falls back to software on its own when the GPU has no
+        # decoder for the codec.
+        "--hwdec=auto-copy",
 
         # Resample the audio clock to the display instead of dropping/repeating
         # frames. Without this a 179.82 fps output on a 180 Hz panel judders.
@@ -164,6 +174,10 @@ def build_args(source: detect.SourceInfo, profile: Profile, script: Path,
         "--keep-open=yes",
         f"--input-ipc-server={ipc}",
         "--term-status-msg=",
+
+        # Live rate readout, drawn only while the OSC bar is up and removed
+        # entirely the rest of the time. See twixt/osd/twixt-fps.lua.
+        f"--script={OSD_SCRIPT}",
     ]
     if input_conf:
         args.append(f"--input-conf={input_conf}")

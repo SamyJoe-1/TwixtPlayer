@@ -268,19 +268,23 @@ def _interp_mvtools(c):
     # Overlap must be even and strictly smaller than the block.
     overlap = max(2, min(blk - 2, int(blk * CFG["overlap"])) // 2 * 2)
 
-    # Motion is estimated on a possibly-downscaled copy, then applied to the
-    # full-resolution frames. Big win at 4K, no visible cost.
-    est = c
-    if CFG["estimate_height"] and c.height > CFG["estimate_height"]:
-        ratio = CFG["estimate_height"] / c.height
-        est = core.resize.Bicubic(
-            c,
-            width=max(16, int(c.width * ratio) // 4 * 4),
-            height=max(16, CFG["estimate_height"] // 4 * 4),
-        )
+    # "Estimate motion on a downscaled copy, apply to full-resolution frames"
+    # does not work in mvtools and never did: a vector clip carries the block
+    # geometry of whatever it was analysed on, so handing half-height vectors
+    # to FlowFPS on the full clip fails outright with "inconsistent source and
+    # vector frame size". There is no vector-rescaling filter in this plugin to
+    # bridge the two.
+    #
+    # So estimate at full resolution and buy the speed back where it is
+    # actually available: pel=1 skips building the sub-pixel interpolated
+    # planes of the Super, which is the expensive half of it, and costs only
+    # whole-pixel vector precision -- far less visible than the frame drops it
+    # prevents. Grid size (`grid`) and `refine` are the other two levers, and
+    # both are measured by `twixt tune`.
+    pel = 1 if (CFG["estimate_height"] and c.height > CFG["estimate_height"]) else CFG["pel"]
 
-    sup_est = core.mv.Super(est, pel=CFG["pel"], sharp=2, rfilter=4)
-    sup_full = core.mv.Super(c, pel=CFG["pel"], sharp=2, rfilter=4, levels=1)
+    sup_est = core.mv.Super(c, pel=pel, sharp=2, rfilter=4)
+    sup_full = sup_est
 
     common = dict(
         blksize=blk, overlap=overlap,

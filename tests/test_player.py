@@ -35,10 +35,14 @@ def test_length_prefix_matches_utf8_bytes_not_characters():
     assert declared != len(str(unicode_path)), "this path must expose the difference"
 
 
-def test_hardware_decoding_is_disabled():
-    # The vapoursynth filter cannot read GPU surfaces; leaving hwdec on is a
-    # silent black-screen failure.
-    assert "--hwdec=no" in _args()
+def test_hardware_decoding_reads_back_to_system_memory():
+    # The vapoursynth filter cannot read GPU surfaces, so a zero-copy hwdec is
+    # a silent black-screen failure -- but a "-copy" one decodes on the GPU and
+    # hands back a normal software frame, which is both safe and much cheaper
+    # than decoding 1440p AV1 on the same cores the filter wants.
+    args = _args()
+    assert "--hwdec=auto-copy" in args
+    assert "--hwdec=auto" not in args, "zero-copy would hand the filter GPU surfaces"
 
 
 def test_sync_flags_prevent_the_judder_we_are_removing():
@@ -65,14 +69,46 @@ def test_explicit_thread_count_wins():
     assert "buffered-frames=14" in vf
 
 
-def test_rife_concurrency_still_follows_streams():
-    """RIFE is GPU bound; more in-flight frames just queues work, so the
-    stream count stays the deliberate limit."""
+def test_rife_concurrency_covers_the_cpu_side_of_the_graph():
+    """RIFE only moves the inference to the GPU. Each frame is still converted
+    YUV -> RGBS -> YUV on the CPU, so requesting exactly num_streams frames
+    leaves the GPU waiting on conversions and the conversions waiting on the
+    GPU. Ask for several per stream instead."""
     profile = profiles.get("neural")        # rife
     profile.num_streams = 3
+    expected = max(4, min(os.cpu_count() or 4, 9))
     vf = next(a for a in _args(profile) if a.startswith("--vf="))
-    assert "concurrent-frames=3" in vf
-    assert "buffered-frames=11" in vf
+    assert f"concurrent-frames={expected}" in vf
+    assert f"buffered-frames={min(64, expected + 8)}" in vf
+    assert "concurrent-frames=3" not in vf
+
+
+def test_rife_concurrency_never_exceeds_the_core_count():
+    """The conversions are the CPU-bound part; more requests than cores just
+    adds latency and decoded-frame memory for no throughput."""
+    profile = profiles.get("neural")
+    profile.num_streams = 64
+    vf = next(a for a in _args(profile) if a.startswith("--vf="))
+    assert f"concurrent-frames={os.cpu_count()}" in vf
+
+
+def test_live_rate_label_is_loaded():
+    """The label is the only way to confirm from the sofa that the rate the
+    profile promises is the rate being delivered, so it ships by default."""
+    args = _args()
+    script = next((a for a in args if a.startswith("--script=")), None)
+    assert script, "the fps label script must be passed to mpv"
+    assert Path(script.split("=", 1)[1]).is_file(), "the script must exist on disk"
+
+
+def test_live_rate_label_script_is_valid_lua_escaping():
+    """ASS override tags are backslash-prefixed and Lua rejects \a as an escape,
+    so the tag string has to be a long-bracket literal. Getting this wrong stops
+    the script loading with nothing but a line in mpv's log to say so."""
+    source = player.OSD_SCRIPT.read_text(encoding="utf-8")
+    assert "[[{" in source, "ASS tags must live in a [[long bracket]] string"
+    assert '"{' not in source, "ASS tags in a quoted string will not parse"
+    assert "" not in source, "a literal BEL means \a was mangled on write"
 
 
 def test_extra_args_are_appended_last():

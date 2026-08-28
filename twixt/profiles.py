@@ -110,14 +110,21 @@ class Profile:
         for two frames at a time on a twenty-core machine leaves eighteen cores
         idle and misses real time by an order of magnitude.
 
-        RIFE is the exception: the work sits on the GPU and `num_streams` is a
-        deliberate choice about how many streams to keep that hardware fed.
+        RIFE moves the *inference* to the GPU but not the rest of the graph:
+        every frame is still converted YUV -> RGBS and back on the CPU, at
+        float32, before and after the network sees it. At 1440p/180 fps that
+        conversion is the thing that starves the GPU, so the request count has
+        to cover it as well as the TensorRT streams -- `num_streams` alone
+        leaves both the CPU and the GPU idle waiting on each other. Three
+        requests per stream keeps a conversion running for each stream that is
+        busy inferring, with a floor of four and the core count as the ceiling.
         """
         if self.threads > 0:
             return self.threads
+        cores = max(1, os.cpu_count() or 4)
         if self.backend == "rife":
-            return max(1, self.num_streams)
-        return max(1, os.cpu_count() or 4)
+            return max(4, min(cores, self.num_streams * 3))
+        return cores
 
     def multiplier(self, source_fps: float, display_fps: float) -> Fraction:
         """Rational frame multiplier, which is what RIFE needs.

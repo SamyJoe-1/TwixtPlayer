@@ -64,7 +64,10 @@ def test_display_rate_equal_to_source_is_a_noop():
 
 def test_mvtools_graph_shape():
     calls, _ = mockvs.run(_script("film"))
-    assert len(mockvs.find(calls, "mv.Super")) == 2, "estimation + full-res supers"
+    # One Super, shared. Two only made sense while an "estimate small, apply
+    # large" path existed, and that path could never work -- see
+    # test_high_resolution_profile_does_not_mismatch_vector_geometry.
+    assert len(mockvs.find(calls, "mv.Super")) == 1, "one super, used for both"
     assert len(mockvs.find(calls, "mv.Analyse")) == 2, "backward + forward vectors"
     assert len(mockvs.find(calls, "mv.Recalculate")) == 2, "refine pass enabled"
     fps = mockvs.find(calls, "mv.FlowFPS")[0]
@@ -89,12 +92,28 @@ def test_anime_profile_tightens_scene_detection():
     assert mockvs.find(calls, "mv.FlowFPS")[0]["thscd1"] == 250
 
 
-def test_4k_profile_estimates_motion_on_a_smaller_copy():
+def test_high_resolution_profile_does_not_mismatch_vector_geometry():
+    """A vector clip carries the block geometry of whatever it was analysed on,
+    so analysing a downscaled copy and then calling FlowFPS on the full-size
+    clip fails outright: "inconsistent source and vector frame size". mvtools
+    has no filter to rescale vectors between the two, so the Super that feeds
+    Analyse must be the same one FlowFPS is given."""
     calls, _ = mockvs.run(_script("4k", backend="mvtools"), width=3840, height=2160)
-    downscales = [kw for kw in mockvs.find(calls, "resize.Bicubic") if "height" in kw]
-    assert downscales, "4K should trigger a downscaled estimation copy"
-    assert downscales[0]["height"] <= 1440
-    assert downscales[0]["width"] % 4 == 0, "mod-4 keeps chroma subsampling legal"
+    supers = mockvs.find(calls, "mv.Super")
+    assert len(supers) == 1, "analysis and application must share one super"
+    assert not [kw for kw in mockvs.find(calls, "resize.Bicubic") if "height" in kw],         "no downscaled estimation copy -- it cannot be applied to the full clip"
+
+
+def test_high_resolution_profile_buys_speed_with_whole_pixel_vectors():
+    """The speed that downscaling was meant to provide comes from pel=1
+    instead: it skips building the sub-pixel planes of the Super, which is the
+    expensive half, at the cost of whole-pixel vector precision."""
+    big, _ = mockvs.run(_script("4k", backend="mvtools"), width=3840, height=2160)
+    assert mockvs.find(big, "mv.Super")[0]["pel"] == 1
+
+    # Below the threshold the profile pays for sub-pixel precision as usual.
+    small, _ = mockvs.run(_script("4k", backend="mvtools"), width=1280, height=720)
+    assert mockvs.find(small, "mv.Super")[0]["pel"] == 2
 
 
 def test_4k_profile_caps_output_rate():
