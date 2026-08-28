@@ -5,12 +5,38 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import sys
+import time as _time
 from pathlib import Path
 
 from . import detect, player, profiles
 from .engine import generate_script
 
 GREEN, RED, DIM, BOLD, RESET = "\033[32m", "\033[31m", "\033[2m", "\033[1m", "\033[0m"
+
+
+# Width of the in-place status line. Wide enough for the longest row it draws,
+# so overwriting one never leaves a tail of the previous message behind.
+_STATUS_WIDTH = 62
+
+
+def _status(text: str) -> None:
+    """Draw an in-place progress line -- no newline, overwritten by the result.
+
+    Deliberately uncoloured: escape codes would throw off the padding that
+    keeps the previous line fully covered.
+    """
+    if not sys.stdout.isatty():
+        return          # redirected: \r would leave both versions on one line
+    sys.stdout.write("\r  " + text.ljust(_STATUS_WIDTH))
+    sys.stdout.flush()
+
+
+def _endstatus(row: str) -> None:
+    """Replace the current status line with a finished row."""
+    if sys.stdout.isatty():
+        sys.stdout.write("\r" + " " * (_STATUS_WIDTH + 4) + "\r")
+    sys.stdout.write(row + "\n")
+    sys.stdout.flush()
 
 
 def _apply_overrides(profile: profiles.Profile, args) -> profiles.Profile:
@@ -161,24 +187,51 @@ def cmd_tune(args) -> int:
     display = detect.display_refresh_hz()
     info = detect.probe(args.file)
 
+    # A build killed halfway leaves an empty engine that vs-mlrt will later
+    # choke on rather than rebuild. Clear those before measuring anything.
+    detect.prune_failed_engines()
+
     multiples = [m for m in (2, 3, 4, 5, 6, 7.5, 8)
                  if info.fps * m <= display + 0.5]
 
     # Which backend wins is not predictable from first principles -- on some
     # machines the neural path is faster, on others block motion is. Measure
     # whatever is installed unless the caller pinned one.
+    #
+    # Order matters: mvtools measures in about a second per configuration,
+    # while RIFE on TensorRT has to compile an engine for this exact frame size
+    # before it can render at all, which takes minutes and prints nothing (the
+    # build happens in a trtexec child process whose output benchmark()
+    # captures). Measuring the cheap backend first means results start
+    # appearing immediately instead of after a silent wait.
+    # RIFE stays opt-in. Its engines are compiled per frame size, so having one
+    # for a file you tuned yesterday says nothing about this one -- there is no
+    # way to know a build is coming until it is already running, and a single
+    # row can then cost ten minutes. Asking for it is cheaper than discovering
+    # it. An explicit --backend rife still means what it says.
     installed = detect.available_backends()
-    backends = ([args.backend] if args.backend
-                else [b for b in ("rife", "mvtools") if installed.get(b)])
+    if args.backend:
+        backends = [args.backend]
+    else:
+        wanted = ("mvtools", "rife") if args.with_rife else ("mvtools",)
+        backends = [b for b in wanted if installed.get(b)]
     if not backends:
         print(f"{RED}No backend installed. Run bootstrap.ps1.{RESET}", file=sys.stderr)
         return 1
 
     print(f"\n  tuning {Path(args.file).name}  "
           f"{DIM}{info.width}x{info.height} {info.fps:.3f} fps -> {display:.0f} Hz "
-          f"panel{RESET}\n")
-    print(f"  {'backend':<9} {'grid':<8} {'target':>9} {'achieved':>10}   verdict")
-    print(f"  {'-' * 54}")
+          f"panel{RESET}")
+    if "rife" in backends:
+        print(f"  {DIM}RIFE: TensorRT compiles an engine per frame size, so the "
+              f"first {info.width}x{info.height} row can take several minutes{RESET}")
+    else:
+        print(f"  {DIM}mvtools only -- add --with-rife to measure the neural "
+              f"backend too (slow to start){RESET}")
+    print()
+    print(f"  {'backend':<9} {'grid':<8} {'target':>9} {'achieved':>10}   "
+          f"verdict    margin")
+    print(f"  {'-' * 62}")
 
     best = None
     for backend in backends:
@@ -198,21 +251,38 @@ def cmd_tune(args) -> int:
                 profile.rate_fixed = info.fps * multiple
                 profile.max_output_fps = display
 
+                target = min(info.fps * multiple, display)
+                shown_grid = grid if backend == "mvtools" else "-"
+                # Say what is being measured *before* measuring it. A run can
+                # take anywhere from a second to several minutes, and a table
+                # that only fills in on completion looks identical to a hang.
+                _status(f"{backend:<9} {shown_grid:<8} {target:>8.1f}p "
+                        f"{'measuring...':>10}")
+
+                started = _time.perf_counter()
                 try:
                     r = player.benchmark(args.file, profile, frames=args.frames)
-                except RuntimeError as exc:
-                    print(f"  {backend:<9} {grid:<8} {DIM}failed{RESET}")
+                except RuntimeError:
+                    _endstatus(f"  {backend:<9} {shown_grid:<8} {DIM}failed{RESET}")
                     continue
+                took = _time.perf_counter() - started
 
-                holds = r["realtime"]
-                mark = f"{GREEN}real time{RESET}" if holds else f"{DIM}too slow{RESET}"
-                shown_grid = grid if backend == "mvtools" else "-"
-                print(f"  {backend:<9} {shown_grid:<8} {r['target_fps']:>8.1f}p "
-                      f"{r['achieved_fps']:>9.1f}p   {mark}")
+                # A configuration that merely reaches the target on one sample
+                # will not survive a busy scene: motion estimation costs more
+                # where there is more motion, and the sample is a single point
+                # in the film. Demand a margin before calling it playable --
+                # measured at 1.11x, this file dropped 94 frames in ten seconds
+                # and drifted 125 ms out of sync.
+                holds = r["achieved_fps"] >= r["target_fps"] * args.margin
+                mark = (f"{GREEN}holds{RESET}    " if holds
+                        else f"{DIM}too slow {RESET}")
+                _endstatus(f"  {backend:<9} {shown_grid:<8} {r['target_fps']:>8.1f}p "
+                           f"{r['achieved_fps']:>9.1f}p   {mark}  "
+                           f"{DIM}{r['headroom']:.2f}x  {took:.1f}s{RESET}")
 
                 if holds:
                     if best is None or r["target_fps"] > best[0]["target_fps"]:
-                        best = (r, backend, grid, multiple)
+                        best = (r, backend, grid, multiple, profile)
                     break   # found this row's ceiling
 
     print()
@@ -221,13 +291,35 @@ def cmd_tune(args) -> int:
               "Try a lower-resolution source.\n")
         return 1
 
-    r, backend, grid, multiple = best
+    r, backend, grid, multiple, winner = best
+    cap = int(r["target_fps"])
     grid_flag = f" --grid {grid}" if backend == "mvtools" else ""
+
+    # Write the winning settings out, so the answer is a file you can reuse
+    # rather than a command line to retype for every file.
+    winner.name = f"tuned {info.width}x{info.height} @ {cap}fps"
+    winner.description = (
+        f"measured on this machine: {r['achieved_fps']:.1f} fps achieved "
+        f"against a {r['target_fps']:.1f} fps target"
+    )
+    # Back to a ceiling rather than a pinned rate, so the profile still does
+    # the right thing on a source with a different frame rate.
+    winner.rate_mode = "display"
+    winner.max_output_fps = float(cap)
+    out = Path(args.output) if args.output else Path("twixt-tuned.json")
+    winner.save(out)
+
     print(f"  {BOLD}best: {r['target_fps']:.1f} fps ({multiple:g}x source) "
           f"on {backend}{RESET}")
-    print(f"  {DIM}headroom {r['headroom']:.2f}x{RESET}\n")
-    print(f"  {BOLD}python -m twixt play \"{args.file}\" --backend {backend}"
-          f"{grid_flag} --cap {r['target_fps']:.0f}{RESET}\n")
+    print(f"  {DIM}headroom {r['headroom']:.2f}x   saved to {out}{RESET}\n")
+    print("  play this file:")
+    print(f"    {BOLD}python -m twixt play \"{args.file}\" --backend {backend}"
+          f"{grid_flag} --cap {cap}{RESET}")
+    print("  or reuse the tuned settings on anything:")
+    print(f"    {BOLD}python -m twixt play \"<file>\" --profile {out}{RESET}\n")
+    print(f"  {DIM}measured {r['headroom']:.2f}x the target against a required "
+          f"{args.margin:g}x. If it still stutters, re-run with a higher "
+          f"--margin.{RESET}\n")
     return 0
 
 
@@ -293,7 +385,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_tune = sub.add_parser("tune", help="find the best settings this machine can hold")
     p_tune.add_argument("file")
     add_common(p_tune)
-    p_tune.add_argument("-n", "--frames", type=int, default=72)
+    # Enough frames that scene-to-scene variation averages out; the fixed
+    # per-run overhead is subtracted out, so this no longer skews the rate.
+    p_tune.add_argument("-n", "--frames", type=int, default=150)
+    p_tune.add_argument("--with-rife", action="store_true",
+                        help="also measure RIFE, even though TensorRT has to "
+                             "compile an engine for this frame size first "
+                             "(minutes, once per resolution)")
+    p_tune.add_argument("--margin", type=float, default=1.25,
+                        help="how much faster than real time a setting must "
+                             "measure before it counts as playable "
+                             "(default 1.25, i.e. 25%% spare capacity)")
+    p_tune.add_argument("-o", "--output", help="where to save the winning "
+                                               "profile (default twixt-tuned.json)")
     p_tune.set_defaults(func=cmd_tune)
 
     p_mpc = sub.add_parser("install-mpchc",

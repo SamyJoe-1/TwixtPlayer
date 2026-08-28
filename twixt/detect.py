@@ -87,6 +87,32 @@ def plugin_dirs() -> list[Path]:
     ) if d.is_dir()]
 
 
+def rife_engine_dirs() -> list[Path]:
+    """Where vs-mlrt writes the TensorRT engines it builds for RIFE."""
+    return [d / "models" / "rife" for d in plugin_dirs()
+            if (d / "models" / "rife").is_dir()]
+
+
+def prune_failed_engines() -> list[Path]:
+    """Delete zero-byte TensorRT engines left behind by an interrupted build.
+
+    trtexec creates the engine file up front and fills it in at the end, so a
+    build that is killed -- Ctrl-C, a timeout, a closed terminal -- leaves an
+    empty one behind. vs-mlrt finds that file, treats the engine as already
+    built, and fails on it instead of rebuilding.
+    """
+    removed = []
+    for directory in rife_engine_dirs():
+        for engine in directory.glob("*.engine"):
+            try:
+                if engine.stat().st_size == 0:
+                    engine.unlink()
+                    removed.append(engine)
+            except OSError:
+                pass
+    return removed
+
+
 def installed_plugins() -> set[str]:
     """Which VapourSynth plugins and helper scripts are present, by stem."""
     found: set[str] = set()

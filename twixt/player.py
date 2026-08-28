@@ -86,10 +86,19 @@ FILTER_LABEL = "twixt"
 
 
 def _vf_arg(script: Path, profile: Profile, labelled: bool = True) -> str:
-    # buffered-frames gives the filter a runway so a momentarily slow frame does
-    # not become a visible hitch; concurrent-frames is how many it works on at once.
-    concurrent = max(1, profile.num_streams)
-    buffered = max(4, concurrent * 2)
+    # concurrent-frames is how many output frames the filter is asked for at
+    # once, and since VapourSynth parallelises across requests rather than
+    # inside a filter, it decides how much of the machine gets used. This used
+    # to be wired to num_streams, a RIFE/TensorRT knob that defaults to 2, which
+    # pinned a twenty-core box to two cores and left mvtools far short of real
+    # time -- the video froze while audio ran on.
+    concurrent = profile.filter_concurrency()
+    # buffered-frames is the decoded-input runway ahead of the filter. It has to
+    # span whatever range the in-flight requests reach across -- worst case one
+    # input frame per request, when the multiplier is close to 1 -- or mpv
+    # refuses with "frame too far in the past". Bounded so that a 4K source does
+    # not park a gigabyte of decoded frames in memory.
+    buffered = min(64, concurrent + 8)
     # The label lets us toggle this exact filter at runtime without disturbing
     # anything else in the chain.
     prefix = f"@{FILTER_LABEL}:" if labelled else ""
@@ -229,20 +238,52 @@ def benchmark(source_path: str | Path, profile: Profile,
         total = int(info.duration * info.fps) if info.duration else 0
         start_frame = max(0, int(total * 0.4)) if total > frames * 4 else 0
 
+    def render(first: int, last: int) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(vspipe), "-c", "y4m", "-s", str(first), "-e", str(last),
+             str(script), os.devnull],
+            capture_output=True, text=True, env=detect.player_env(), timeout=1200,
+        )
+
+    # Every vspipe run carries a fixed cost that playback does not: opening and
+    # indexing the source (close to a minute for a feature-length file, once),
+    # then on each run the process start, the plugin loads and building the
+    # filter graph -- around a second and a half. Timing that in makes a machine
+    # look far slower than it is, and the shorter the sample the worse the lie:
+    # at 72 frames the overhead *is* the measurement.
+    #
+    # So measure it and take it out. One run to absorb indexing, a second
+    # single-frame run for the per-run overhead, then the real sample. The rate
+    # is the slope between the last two, which cancels the fixed term and makes
+    # the answer independent of how many frames were sampled.
+    warm_start = time.perf_counter()
+    warm = render(start_frame, start_frame)
+    index_seconds = time.perf_counter() - warm_start
+    if warm.returncode != 0:
+        script.unlink(missing_ok=True)
+        raise RuntimeError(f"vspipe failed:\n{warm.stderr.strip()[:2000]}")
+
+    overhead_start = time.perf_counter()
+    single = render(start_frame, start_frame)
+    overhead = time.perf_counter() - overhead_start
+    if single.returncode != 0:
+        script.unlink(missing_ok=True)
+        raise RuntimeError(f"vspipe failed:\n{single.stderr.strip()[:2000]}")
+
     start = time.perf_counter()
-    proc = subprocess.run(
-        [str(vspipe), "-c", "y4m",
-         "-s", str(start_frame), "-e", str(start_frame + frames - 1),
-         str(script), os.devnull],
-        capture_output=True, text=True, env=detect.player_env(), timeout=1200,
-    )
+    proc = render(start_frame, start_frame + frames - 1)
     elapsed = time.perf_counter() - start
     script.unlink(missing_ok=True)
 
     if proc.returncode != 0:
         raise RuntimeError(f"vspipe failed:\n{proc.stderr.strip()[:2000]}")
 
-    achieved = frames / elapsed if elapsed > 0 else 0.0
+    # Guard the subtraction: if the sample somehow finished no slower than a
+    # single frame, the two runs are within noise of each other and the slope
+    # is meaningless, so fall back to the raw (pessimistic) rate.
+    render_time = elapsed - overhead
+    achieved = ((frames - 1) / render_time if render_time > 0.05
+                else (frames / elapsed if elapsed > 0 else 0.0))
     return {
         "source_fps": info.fps,
         "target_fps": target,
@@ -253,4 +294,6 @@ def benchmark(source_path: str | Path, profile: Profile,
         "elapsed": elapsed,
         "frames": frames,
         "start_frame": start_frame,
+        "index_seconds": index_seconds,
+        "overhead_seconds": overhead,
     }

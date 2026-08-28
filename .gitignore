@@ -48,3 +48,8 @@ venv/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# --- tuning output ------------------------------------------------------------
+# `twixt tune` writes the winning profile here. It is measured on one machine
+# for one file, so it is a local result rather than something to share.
+twixt-tuned.json
