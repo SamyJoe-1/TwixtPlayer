@@ -166,6 +166,17 @@ def build_args(source: detect.SourceInfo, profile: Profile, script: Path,
         # frames. Without this a 179.82 fps output on a 180 Hz panel judders.
         "--video-sync=display-resample",
 
+        # mpv stamps the filter's output from the first frame it is fed after a
+        # seek. With hr-seek framedrop on, the frames between the keyframe and
+        # the target are dropped *after* that stamp is taken, so the picture
+        # ran ahead of the sound by however far the keyframe was -- 0.4 s to
+        # several seconds depending on where you jumped. Measured 0.0 s with
+        # this off.
+        "--hr-seek-framedrop=no",
+
+        # Play the sound earlier to line up with the interpolated picture.
+        f"--audio-delay={profile.audio_delay}",
+
         # mpv's own frame blending would fight our interpolation.
         "--interpolation=no",
 

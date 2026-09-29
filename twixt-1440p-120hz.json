@@ -21,12 +21,13 @@
   "refine": true,
   "wide_search": false,
   "artifact_masking": "average",
-  "scene_change_threshold": 400,
+  "scene_change_threshold": 200,
   "scene_detection": true,
   "blend_on_scene_change": false,
   "motion_blur": 0.0,
   "downscale_above_height": 1080,
   "threads": 0,
   "num_streams": 2,
-  "bypass_above_fps": 59.0
+  "bypass_above_fps": 59.0,
+  "audio_delay": -0.8
 }

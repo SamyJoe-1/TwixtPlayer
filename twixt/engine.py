@@ -189,7 +189,7 @@ def _mark_scene_changes(c):
         vec = core.mv.Analyse(sup, isb=True, blksize=32, overlap=0, search=0)
         return core.mv.SCDetection(
             c, vec,
-            thscd1=CFG["scene_change_threshold"], thscd2=130,
+            thscd1=CFG["scene_change_threshold"], thscd2=90,
         )
     except Exception:
         # Scene detection is a quality guard, not a requirement; if mvtools is
@@ -315,7 +315,7 @@ def _interp_mvtools(c):
         ml=max(1, CFG["artifact_ml"]),
         blend=CFG["blend_on_scene_change"],
         thscd1=CFG["scene_change_threshold"],
-        thscd2=130,
+        thscd2=90,
     )
 
     if CFG["motion_blur"] > 0:

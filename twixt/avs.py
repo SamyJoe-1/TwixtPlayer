@@ -58,7 +58,7 @@ if (fps > {bypass}) {{
     res = MFlowFps(src, sup, bv, fv, \\
              num=FramerateNumerator(src) * mult, den=FramerateDenominator(src), \\
              mask=2, ml={ml}, blend={blend}, \\
-             thscd1={thscd1}, thscd2=130)
+             thscd1={thscd1}, thscd2=90)
 {proof}
     res
     Prefetch({threads})

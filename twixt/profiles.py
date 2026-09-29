@@ -91,6 +91,8 @@ class Profile:
     # --- passthrough -------------------------------------------------------
     # Skip interpolation entirely when the source already exceeds this.
     bypass_above_fps: float = 59.0
+    # Seconds to shift the sound. Negative = sound plays earlier.
+    audio_delay: float = -0.8
 
     def resolve_target_fps(self, source_fps: float, display_fps: float) -> float:
         """Work out the fps this profile wants to produce."""
