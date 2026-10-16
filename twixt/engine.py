@@ -347,6 +347,36 @@ def _interp_svpflow(c):
     return out if out.format.id == fmt.id else core.resize.Bicubic(out, format=fmt.id)
 
 
+# --- enhance ----------------------------------------------------------------
+
+def _enhance(c):
+    """Clean up and upscale the source before interpolation.
+
+    Runs at the source rate (24 fps), not the output rate, so the network only
+    sees each real frame once; the interpolator then works on the clean frames.
+    """
+    mode = CFG["enhance"]
+    if mode == "off" or c.height * 2 > CFG["enhance_max_height"]:
+        return c
+    import vsmlrt
+    fmt = c.format
+    backend = vsmlrt.Backend.TRT(
+        fp16=True, num_streams=2, use_cuda_graph=True,
+        output_format=1,  # fp16 out
+    )
+    x = core.resize.Bicubic(c, format=vs.RGBH, matrix_in_s=CFG["matrix"])
+    if mode == "deblock+upscale":
+        x = vsmlrt.DPIR(
+            x, strength=CFG["deblock_strength"],
+            model=vsmlrt.DPIRModel.drunet_deblocking_color, backend=backend,
+        )
+    x = vsmlrt.RealESRGAN(
+        x, model=vsmlrt.RealESRGANModel.animevideo_xsx2, backend=backend,
+    )
+    return core.resize.Bicubic(x, format=fmt.id, matrix_s=CFG["matrix"],
+                               dither_type="error_diffusion")
+
+
 # --- assemble ---------------------------------------------------------------
 
 BACKENDS = {"rife": _interp_rife, "mvtools": _interp_mvtools, "svpflow": _interp_svpflow}
@@ -358,6 +388,15 @@ if _reason and _HOST == "dshow":
     # 60 fps source costs nothing rather than being copied through untouched.
     VpsFilterDisconnect = True
 else:
+    # When mpv cannot tell the file's length it reports a placeholder of
+    # 134217727 (2**27 - 1) frames. Interpolating that multiplies it by the
+    # rate ratio, and once the output passes 2**29 frames mvtools/VapourSynth
+    # abort mpv.exe (0xC0000409) -- at ~4.2x and above, i.e. any cap over ~100 fps
+    # on a 25 fps file. Clamp to a length no film reaches so the product stays small.
+    _MAX_OUT_FRAMES = 1 << 28
+    if clip.num_frames * float(MULTI) > _MAX_OUT_FRAMES:
+        clip = core.std.Trim(clip, length=int(_MAX_OUT_FRAMES / float(MULTI)))
+    clip = _enhance(clip)
     out = clip if _reason else BACKENDS[CFG["backend"]](clip)
     out.set_output()
 '''
@@ -375,6 +414,9 @@ def build_config(profile: Profile, source_fps: float, display_fps: float,
     blk = GRID[profile.grid]
     return {
         "backend": profile.backend,
+        "enhance": profile.enhance,
+        "deblock_strength": profile.deblock_strength,
+        "enhance_max_height": profile.enhance_max_height,
         "rate_mode": profile.rate_mode,
         "rate_multiplier": profile.rate_multiplier,
         "rate_fixed": profile.rate_fixed,

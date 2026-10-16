@@ -93,6 +93,13 @@ class Profile:
     bypass_above_fps: float = 59.0
     # Seconds to shift the sound. Negative = sound plays earlier.
     audio_delay: float = -0.8
+    # Picture clean-up before interpolation, on the GPU (vs-mlrt / TensorRT).
+    #   off              untouched
+    #   upscale          RealESRGAN compact 2x
+    #   deblock+upscale  DPIR removes compression blocks first, then 2x
+    enhance: Literal["off", "upscale", "deblock+upscale"] = "off"
+    deblock_strength: float = 30.0
+    enhance_max_height: int = 1440  # never upscale past this
 
     def resolve_target_fps(self, source_fps: float, display_fps: float) -> float:
         """Work out the fps this profile wants to produce."""
