@@ -237,9 +237,24 @@ def launch(source_path: str | Path, profile: Profile,
     if dry_run:
         return args
 
-    process = subprocess.Popen(args, env=detect.player_env())
+    process = subprocess.Popen(args, env=detect.player_env(), **_priority())
     return Session(process=process, script=script, ipc=ipc,
                    source=info, profile=profile, target_fps=target)
+
+
+def _priority() -> dict:
+    """Run the player above normal priority on Windows.
+
+    Windows always runs the highest-priority ready thread first ("Scheduling
+    Priorities", Microsoft docs). At normal priority a browser tab or game
+    launcher competes with the interpolation threads on equal terms, and every
+    time it wins a frame can miss its vsync. ABOVE_NORMAL wins those ties
+    without the risk of HIGH, which can starve the desktop itself while mvtools
+    keeps every core busy.
+    """
+    if os.name != "nt":
+        return {}
+    return {"creationflags": getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0x00008000)}
 
 
 # --- capability check -------------------------------------------------------

@@ -452,8 +452,14 @@ def cmd_mpchc_uninstall(args) -> int:
 
 
 def cmd_gui(args) -> int:
-    from .gui import main as gui_main
-    return gui_main()
+    try:
+        from .gui_qt import main as qt_main
+    except ImportError:
+        print(f"  {DIM}PySide6 is not installed, so this is the basic window. For the full "
+              f"one:  python -m pip install PySide6{RESET}")
+        from .gui import main as gui_main
+        return gui_main()
+    return qt_main([args.file] if getattr(args, "file", None) else [])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -548,7 +554,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="check the runtime install").set_defaults(func=cmd_doctor)
     sub.add_parser("profiles", help="list built-in profiles").set_defaults(func=cmd_profiles)
-    sub.add_parser("gui", help="open the manager window").set_defaults(func=cmd_gui)
+    p_gui = sub.add_parser("gui", help="open the manager window")
+    p_gui.add_argument("file", nargs="?", help="video to load straight away")
+    p_gui.set_defaults(func=cmd_gui)
 
     return parser
 

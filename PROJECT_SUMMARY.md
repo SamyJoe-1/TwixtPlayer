@@ -18,13 +18,14 @@ Python generates a per-file `.vpy` script and launches mpv. Target machine: RTX 
 | `twixt/player.py` | `live_check()` (fullscreen playback, reads frame-drop/decoder-drop/mistimed/vo-delayed counters, vsync-ratio, display-sync-active, speed), mpv args (`--hwdec=nvdec-copy,auto-copy`, `--video-sync=display-resample`, `--vo=gpu-next`, `--profile=high-quality`, `--interpolation=no`, `--hr-seek-framedrop=no`, audio-delay), `_vf_arg` (buffered/concurrent frames), IPC `Session`, input.conf (TAB toggles the filter, BS shows stats), and `benchmark()` (vspipe slope timing) |
 | `twixt/detect.py` | runtime paths under `runtime/`, refresh rate (Win32_VideoController), ffprobe `probe()`, `player_env()` |
 | `twixt/cli.py` | commands: play / bench / tune (display/k rates × quality ladder large/p1 → small/p2, keeps the best that holds) / **check** (real mpv playback judged by mpv counters; `--auto` saves the best smooth rate) / script / doctor / profiles / gui / install-mpchc. Flags: `--profile --backend --fps --multiplier --cap --grid --masking --threads --no-snap` |
-| `twixt/gui.py` | Tk manager window |
+| `twixt/gui_qt.py` | **Main GUI** (PySide6, dark neon): DropZone (drag-drop/click, probe chips), ProfileCard row (from `_discover_profiles`: twixt-checked/rife/1440p/120hz/enhance/tuned json, then presets), summary with target fps and cadence chip, GradientButton Play (in-process `player.launch`), Auto-optimize (QProcess chain `tune` → `check --auto`, ANSI-stripped log console), DWM dark title bar. Launched by `gui.cmd` / `twixt gui [file]` |
+| `twixt/gui.py` | old Tk window, used as the fallback when PySide6 is missing |
 | `twixt/avs.py`, `mpchc.py`, `_mpchc_cli.py` | AviSynth/MPC-HC path (does not work: MPC-HC will not load the filter; see README) |
 | `twixt/osd/twixt-fps.lua` | fps label that shows with the OSC |
 | `bootstrap.ps1` | installs mpv, VapourSynth portable, vsrepo plugins `mv bs akarin`, vs-mlrt TensorRT and models, rife-ncnn |
 | `*.json` (root) | user profiles: `twixt-1440p.json` (mvtools 90), `twixt-1440p-120hz.json` (needs the 120 Hz panel), `twixt-1440p-rife.json` (GPU 90), `twixt-enhance.json` |
-| `play.cmd` / `play-rife.cmd` | drag-and-drop launchers |
-| `tests/` | `test_cli.py` (tune/check logic with fake measurements), `mockvs.py` (fake VS that records calls), `test_engine/player/profiles.py`, `test_rife_graph_realvs.py` (real VS plus a linear-blend RIFEMerge stand-in) |
+| `play.cmd` / `play-rife.cmd` / `gui.cmd` | drag-and-drop launchers (`gui.cmd` installs PySide6 on first run) |
+| `tests/` | `test_gui_qt.py` (offscreen Qt: cards, cadence, real QProcess optimize chain), `test_cli.py` (tune/check logic with fake measurements), `mockvs.py` (fake VS that records calls), `test_engine/player/profiles.py`, `test_rife_graph_realvs.py` (real VS plus a linear-blend RIFEMerge stand-in) |
 
 ## Key facts / decisions (sourced)
 - mpv vf_vapoursynth: the buffer size is buffered-frames × concurrent-frames; a larger buffer gives no speed-up (mpv manual).
@@ -32,8 +33,10 @@ Python generates a per-file `.vpy` script and launches mpv. Target machine: RTX 
 - vs-mlrt: `RIFE(video_player=True)` with a fractional multi uses Python FrameEval per frame, which caused the GIL bottleneck. `RIFEMerge` needs float16/32 RGB. Padding multiple is 32, or 64 for 4.26+ and 4.25-heavy, or 128 for 4.25-lite. `scale != 1` is not supported for models ≥ 4.7.
 - mpv vf_vapoursynth accepts only YUV formats (integer or float), so RIFE output must be converted back to YUV. A seek rebuilds the VS core (`vf_vapoursynth_reset` → `destroy_vs`), which reloads the TRT engine.
 - mpv: nvdec/nvdec-copy is the recommended hwdec on Nvidia.
+- Windows: mpv is launched at ABOVE_NORMAL_PRIORITY_CLASS (`player._priority`).
 - Cadence: output must equal display/k or frames are held unevenly. On 180 Hz: 180 / 90 / 60.
 
 ## Change log
 - 2026-11-04: cadence snapping, native RIFE graph with RGBH, MVTools scene thresholds back to defaults, buffered-frames fix, no output-rate reconversion, ml inversion fix, exact NTSC rates, tune tests display/k, akarin in bootstrap, RIFE profile and launcher.
 - 2026-11-04 (round 2): `twixt check` live verification and `--auto`, tune quality ladder, nvdec-copy, RIFE scene detection on a 960 px copy, `--threads`.
+- 2026-11-04 (round 3): new PySide6 GUI (drag-drop, profile cards, Play, Auto-optimize), gui.cmd, docs/gui.png, mpv at above-normal priority.

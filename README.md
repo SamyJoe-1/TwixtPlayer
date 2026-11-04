@@ -209,11 +209,27 @@ MVTools at 1080p produced **55 fps of output when targeting 180**, but only
 therefore cannot be extrapolated to a different target, which is what `tune`
 exists to handle.
 
-The manager window, if you'd rather click:
+### The manager window
+
+![twixt manager](docs/gui.png)
+
+Double-click **`gui.cmd`**, or drag a video onto it. The first run installs PySide6 (Qt) on its own.
+
+- **Drop a video** to see its resolution, codec, fps and length.
+- **Pick a profile card**: Optimized, RIFE GPU, Smooth 1440p, 120 Hz panel, Upscale, or the presets.
+- The readout shows the exact rate that will play and how many refreshes each
+  frame is held. Green means even cadence; amber means it will judder.
+- **▶ Play** starts mpv. Press it again to stop.
+- **⚡ Auto-optimize** runs `tune` (filter speed) and then `check --auto` (real fullscreen
+  playback), streams both into the console, and selects the resulting
+  **Optimized** card (`twixt-checked.json`).
 
 ```bash
-python -m twixt gui
+python -m twixt gui ["film.mkv"]
 ```
+
+Without PySide6 it falls back to the old Tk window. The player runs at
+above-normal priority on Windows, so background apps can't steal its vsync.
 
 ### Common adjustments
 
