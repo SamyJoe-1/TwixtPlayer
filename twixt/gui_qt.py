@@ -18,13 +18,13 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import (QEasingCurve, QObject, QProcess, QPropertyAnimation,
+from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QProcess, QPropertyAnimation,
                             QProcessEnvironment, QSettings, Qt, QTimer, Signal, Property)
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFileDialog,
                                QFrame, QGraphicsDropShadowEffect, QGridLayout,
                                QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QPushButton,
+                               QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from . import detect, player, profiles
@@ -811,50 +811,33 @@ class TwixtWindow(QMainWindow):
 
 # --- the simple window (what opens by default) -------------------------------
 
-def _playback_profile(fps: float) -> profiles.Profile:
-    """The settings behind 'play at N fps' -- no choices asked of the user.
-
-    Uses what Auto-optimize measured on this PC if that exists, otherwise the
-    1440p profile measured when this was built (mvtools, CPU), otherwise the
-    cheapest preset. Only the rate changes.
-    """
-    for name in ("twixt-checked.json", "twixt-1440p.json"):
-        path = detect.ROOT / name
-        if path.is_file():
-            try:
-                base = profiles.Profile.load(path)
-                break
-            except Exception:
-                pass
-    else:
-        base = profiles.get("fast")
-    prof = dataclasses.replace(base)
-    prof.rate_mode, prof.rate_fixed, prof.max_output_fps = "fixed", fps, fps
-    prof.snap_to_display = True
-    return prof
+from . import smart                      # noqa: E402
+smooth_rates = smart.smooth_rates        # kept importable from here
 
 
-def smooth_rates(display_hz: float, source_fps: float = 23.976) -> list[float]:
-    """Rates this monitor shows evenly (display / k), above the film's own."""
-    # At least 60 and at least double the film: below that there is little
-    # motion to smooth and nothing worth choosing.
-    floor = max(60.0, source_fps * 2) - 0.5
-    rates = [display_hz / k for k in range(1, 9) if display_hz / k >= floor]
-    return [round(r, 2) for r in rates][:3] or [display_hz]
+def _segment_style(font_px: int = 15) -> str:
+    return (f"QPushButton {{ background: {PANEL}; border: 1px solid {LINE}; border-radius: 12px;"
+            f" font-size: {font_px}px; font-weight: 700; padding: 0 10px; }}"
+            f" QPushButton:hover {{ border-color: #3a4260; }}"
+            f" QPushButton:checked {{ border: 1.5px solid {CYAN}; color: {CYAN};"
+            f" background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            f" stop:0 rgba(0,229,255,0.13), stop:1 rgba(168,85,247,0.13)); }}"
+            f" QPushButton:disabled {{ color: #4a5163; }}")
 
 
 class SimpleWindow(QMainWindow):
-    """Choose video -> choose fps -> Play. Nothing else on screen."""
+    """Video -> what you're watching -> frame rate -> Play. Auto by default."""
 
     def __init__(self, initial: str | None = None) -> None:
         super().__init__()
         self.setWindowTitle("twixt")
-        self.resize(560, 560)
-        self.setMinimumSize(480, 500)
+        self.resize(660, 640)
+        self.setMinimumSize(600, 600)
         self.setAcceptDrops(True)
         self.settings = QSettings("twixt", "twixt")
         self.source: detect.SourceInfo | None = None
         self.display_fps = 0.0
+        self.backends = detect.available_backends()
         self.session: player.Session | None = None
         self.advanced = None
         self._bridge = _Bridge()
@@ -867,7 +850,7 @@ class SimpleWindow(QMainWindow):
         root.setObjectName("root")
         self.setCentralWidget(root)
         lay = QVBoxLayout(root)
-        lay.setContentsMargins(36, 26, 36, 26)
+        lay.setContentsMargins(36, 26, 36, 24)
         lay.setSpacing(0)
 
         head = QHBoxLayout()
@@ -880,22 +863,25 @@ class SimpleWindow(QMainWindow):
         gear = QPushButton("⚙")
         gear.setObjectName("link")
         gear.setStyleSheet(f"font-size: 18px; color: {MUTED};")
-        gear.setToolTip("Advanced: engines, profiles, auto-optimize")
+        gear.setToolTip("Advanced: engines, profiles, test my PC")
         gear.setCursor(Qt.PointingHandCursor)
         gear.clicked.connect(self.open_advanced)
         head.addWidget(gear)
         lay.addLayout(head)
-        lay.addSpacing(26)
+        lay.addSpacing(22)
+
+        def section(text):
+            label = QLabel(text)
+            label.setObjectName("section")
+            lay.addWidget(label)
+            lay.addSpacing(9)
 
         # 1. video
-        step1 = QLabel("1   VIDEO")
-        step1.setObjectName("section")
-        lay.addWidget(step1)
-        lay.addSpacing(10)
+        section("1   VIDEO")
         self.pick = QPushButton("Choose a video…")
         self.pick.setObjectName("pick")
         self.pick.setCursor(Qt.PointingHandCursor)
-        self.pick.setMinimumHeight(64)
+        self.pick.setMinimumHeight(58)
         self.pick.setStyleSheet(
             f"QPushButton#pick {{ background: {PANEL}; border: 1px solid {LINE};"
             f" border-radius: 14px; font-size: 16px; font-weight: 600; text-align: left;"
@@ -906,39 +892,109 @@ class SimpleWindow(QMainWindow):
         self.meta.setObjectName("muted")
         self.meta.setStyleSheet("font-size: 12px; padding: 6px 4px 0 4px;")
         lay.addWidget(self.meta)
-        lay.addSpacing(24)
+        lay.addSpacing(18)
 
-        # 2. fps
-        step2 = QLabel("2   FRAME RATE")
-        step2.setObjectName("section")
-        lay.addWidget(step2)
-        lay.addSpacing(10)
-        self.rates_row = QHBoxLayout()
-        self.rates_row.setSpacing(12)
-        lay.addLayout(self.rates_row)
+        # 2. what you're watching
+        section("2   WHAT ARE YOU WATCHING")
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.kind_group = QButtonGroup(self)
+        for key, text in (("auto", "★ Auto"), ("movies", "Movies / TV"), ("anime", "Anime"),
+                          ("sports", "Sports"), ("gaming", "Gaming / YouTube")):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumHeight(48)
+            b.setStyleSheet(_segment_style(14))
+            b.setProperty("kind", key)
+            self.kind_group.addButton(b)
+            row.addWidget(b)
+        lay.addLayout(row)
+        lay.addSpacing(18)
+
+        # 3. frame rate
+        section("3   FRAME RATE")
+        row = QHBoxLayout()
+        row.setSpacing(10)
         self.rate_group = QButtonGroup(self)
-        self.rate_group.setExclusive(True)
-        self.rate_note = QLabel("")
-        self.rate_note.setObjectName("muted")
-        self.rate_note.setWordWrap(True)
-        self.rate_note.setStyleSheet("font-size: 12px; padding: 8px 4px 0 4px;")
-        lay.addWidget(self.rate_note)
-        lay.addStretch(1)
+        self.rate_buttons = []
+        for i in range(4):          # Auto + up to three even rates
+            b = QPushButton()
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumHeight(58)
+            b.setStyleSheet(_segment_style(17))
+            self.rate_group.addButton(b)
+            self.rate_buttons.append(b)
+            row.addWidget(b)
+        self.rate_buttons[0].setText("★ Auto")
+        self.rate_buttons[0].setProperty("fps", "auto")
+        self.custom_btn = QPushButton("Custom")
+        self.custom_btn.setCheckable(True)
+        self.custom_btn.setCursor(Qt.PointingHandCursor)
+        self.custom_btn.setMinimumHeight(58)
+        self.custom_btn.setStyleSheet(_segment_style(15))
+        self.custom_btn.setProperty("fps", "custom")
+        self.rate_group.addButton(self.custom_btn)
+        row.addWidget(self.custom_btn)
+        self.custom = QSpinBox()
+        self.custom.setRange(30, 480)
+        self.custom.setSuffix(" fps")
+        self.custom.setValue(int(self.settings.value("custom_fps", 120)))
+        self.custom.setMinimumHeight(58)
+        self.custom.setMinimumWidth(112)
+        self.custom.setAlignment(Qt.AlignCenter)
+        self.custom.setStyleSheet(
+            f"QSpinBox {{ background: {PANEL_HI}; border: 1px solid {LINE}; border-radius: 12px;"
+            f" font-size: 17px; font-weight: 700; padding: 0 8px; }}"
+            f" QSpinBox:focus {{ border-color: {CYAN}; }}"
+            f" QSpinBox::up-button, QSpinBox::down-button {{ width: 18px; border: none; }}")
+        self.custom.valueChanged.connect(self._on_custom)
+        # Clicking into the box means "custom", even before the number changes.
+        self.custom.installEventFilter(self)
+        self.custom.lineEdit().installEventFilter(self)
+        row.addWidget(self.custom)
+        lay.addLayout(row)
+        lay.addSpacing(14)
 
-        # 3. play
+        # what Auto decided, and why
+        self.plan_box = QFrame()
+        self.plan_box.setObjectName("panel")
+        pb = QVBoxLayout(self.plan_box)
+        pb.setContentsMargins(16, 12, 16, 12)
+        pb.setSpacing(4)
+        self.plan_title = QLabel("")
+        self.plan_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        self.plan_why = QLabel("")
+        self.plan_why.setObjectName("muted")
+        self.plan_why.setWordWrap(True)
+        self.plan_why.setStyleSheet("font-size: 12px;")
+        self.plan_warn = QLabel("")
+        self.plan_warn.setWordWrap(True)
+        self.plan_warn.setStyleSheet(f"font-size: 12px; color: {WARN};")
+        pb.addWidget(self.plan_title)
+        pb.addWidget(self.plan_why)
+        pb.addWidget(self.plan_warn)
+        lay.addWidget(self.plan_box)
+        lay.addStretch(1)
+        lay.addSpacing(14)
+
+        # 4. play
         self.play_btn = GradientButton("▶  Play")
         self.play_btn.setMinimumHeight(60)
         self.play_btn.clicked.connect(self.toggle_play)
         lay.addWidget(self.play_btn)
-        lay.addSpacing(12)
+        lay.addSpacing(10)
         self.status = QLabel("")
         self.status.setAlignment(Qt.AlignCenter)
         self.status.setObjectName("muted")
         self.status.setStyleSheet("font-size: 12px;")
         lay.addWidget(self.status)
 
-        self._make_rate_buttons()
-        self._build_rates([180.0, 90.0, 60.0])
+        self._restore_choices()
+        self.kind_group.buttonToggled.connect(self._on_choice)
+        self.rate_group.buttonToggled.connect(self._on_choice)
+        self._set_rates(smooth_rates(180.0))
         self._refresh()
         _in_thread(lambda: self._bridge.display.emit(detect.display_refresh_hz()))
         self._watch = QTimer(self)
@@ -947,57 +1003,87 @@ class SimpleWindow(QMainWindow):
         if initial:
             self.open_file(initial)
 
-    # --- rates -----------------------------------------------------------
+    # --- choices ---------------------------------------------------------
 
-    def _make_rate_buttons(self) -> None:
-        """Three fixed slots, relabelled per monitor -- never rebuilt."""
-        for _ in range(3):
-            b = QPushButton()
-            b.setCheckable(True)
-            b.setCursor(Qt.PointingHandCursor)
-            b.setMinimumHeight(78)
-            b.setStyleSheet(
-                f"QPushButton {{ background: {PANEL}; border: 1px solid {LINE}; border-radius: 14px;"
-                f" font-size: 20px; font-weight: 800; }}"
-                f" QPushButton:hover {{ border-color: #3a4260; }}"
-                f" QPushButton:checked {{ border: 1.5px solid {CYAN}; color: {CYAN};"
-                f" background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-                f" stop:0 rgba(0,229,255,0.13), stop:1 rgba(168,85,247,0.13)); }}")
-            self.rate_group.addButton(b)
-            self.rates_row.addWidget(b)
-        self.rate_group.buttonToggled.connect(self._on_rate)
+    def _restore_choices(self) -> None:
+        kind = str(self.settings.value("kind", "auto"))
+        for b in self.kind_group.buttons():
+            b.setChecked(b.property("kind") == kind)
+        if not self.kind_group.checkedButton():
+            self.kind_group.buttons()[0].setChecked(True)
 
-    def _build_rates(self, rates: list[float]) -> None:
-        wanted = float(self.settings.value("fps", 90.0))
-        pick = min(rates, key=lambda r: abs(r - wanted))
-        for b, rate in zip(self.rate_group.buttons(), rates + [None] * 3):
+    def _set_rates(self, rates: list[float]) -> None:
+        saved = str(self.settings.value("fps", "auto"))
+        for b, rate in zip(self.rate_buttons[1:], rates + [None] * 3):
             b.setVisible(rate is not None)
-            if rate is None:
-                continue
-            b.setText(f"{rate:g}\nfps")
-            b.setProperty("fps", rate)
-            if rate == pick:
-                b.setChecked(True)
-        self._on_rate()
+            if rate is not None:
+                b.setText(f"{rate:g}")
+                b.setProperty("fps", rate)
+        if saved == "auto":
+            self.rate_buttons[0].setChecked(True)
+        elif saved == "custom":
+            self.custom_btn.setChecked(True)
+        else:
+            match = [b for b in self.rate_buttons[1:]
+                     if b.isVisibleTo(self) and str(b.property("fps")) == saved]
+            (match[0] if match else self.rate_buttons[0]).setChecked(True)
+        self._update_plan()
 
-    def fps(self) -> float:
+    def kind(self) -> str:
+        b = self.kind_group.checkedButton()
+        return b.property("kind") if b else "auto"
+
+    def fps_choice(self):
         b = self.rate_group.checkedButton()
-        return float(b.property("fps")) if b else 90.0
+        value = b.property("fps") if b else "auto"
+        if value == "custom":
+            return float(self.custom.value())
+        return value
 
-    def _on_rate(self, *_):
-        fps = self.fps()
-        self.settings.setValue("fps", fps)
-        hz = self.display_fps or 0
-        note = (f"Your monitor runs at {hz:g} Hz. These rates divide it exactly, "
-                "so motion stays even.") if hz else ""
-        if hz > 120 and hz % 120:
-            note += "  For 120 fps, set the monitor to 120 Hz in Windows display settings."
-        self.rate_note.setText(note)
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (QEvent.FocusIn, QEvent.MouseButtonPress) and \
+                obj in (self.custom, self.custom.lineEdit()):
+            if not self.custom_btn.isChecked():
+                self.custom_btn.setChecked(True)
+        return super().eventFilter(obj, event)
+
+    def _on_custom(self, value: int) -> None:
+        self.settings.setValue("custom_fps", value)
+        if not self.custom_btn.isChecked():
+            self.custom_btn.setChecked(True)     # typing a number means "use it"
+        self._update_plan()
+
+    def _on_choice(self, *_):
+        self.settings.setValue("kind", self.kind())
+        b = self.rate_group.checkedButton()
+        self.settings.setValue("fps", str(b.property("fps")) if b else "auto")
+        self._update_plan()
+
+    def current_plan(self) -> smart.Plan | None:
+        if not self.source or not self.display_fps:
+            return None
+        return smart.plan(self.source, self.display_fps, self.kind(), self.fps_choice(),
+                          self.backends)
+
+    def _update_plan(self) -> None:
+        plan = self.current_plan()
+        if not plan:
+            self.plan_title.setText("Choose a video and press Play")
+            self.plan_why.setText("★ Auto reads the file and your monitor and picks the rest.")
+            self.plan_warn.hide()
+            return
+        self.plan_title.setText(
+            f'<span style="color:{CYAN}">{plan.fps:g} fps</span>'
+            f'<span style="color:{MUTED}">   ·   </span>{smart.LABELS[plan.content]}'
+            f'<span style="color:{MUTED}">   ·   </span>{plan.engine}')
+        why = plan.reasons or [f"{smart.LABELS[plan.content]} settings, {plan.fps:g} fps as chosen"]
+        self.plan_why.setText("   ·   ".join(why))
+        self.plan_warn.setText("⚠  " + plan.warning if plan.warning else "")
+        self.plan_warn.setVisible(bool(plan.warning))
 
     def _on_display(self, hz: float) -> None:
         self.display_fps = hz
-        src = self.source.fps if self.source else 23.976
-        self._build_rates(smooth_rates(hz, src))
+        self._set_rates(smooth_rates(hz, self.source.fps if self.source else 23.976))
 
     # --- video -----------------------------------------------------------
 
@@ -1017,10 +1103,11 @@ class SimpleWindow(QMainWindow):
     def _on_probed(self, info: detect.SourceInfo) -> None:
         self.source = info
         bits = [f"{info.width}×{info.height}" if info.width else "",
-                info.codec.upper(), f"{info.fps:.3f} fps"]
+                info.codec.upper(), f"{info.fps:.3f} fps",
+                f"{self.display_fps:g} Hz monitor" if self.display_fps else ""]
         self.meta.setText("   ·   ".join(b for b in bits if b))
         if self.display_fps:
-            self._build_rates(smooth_rates(self.display_fps, info.fps))
+            self._set_rates(smooth_rates(self.display_fps, info.fps))
         self._refresh()
 
     def dragEnterEvent(self, e) -> None:
@@ -1040,10 +1127,10 @@ class SimpleWindow(QMainWindow):
         self.play_btn.setText("■  Stop" if playing else "▶  Play")
         self.play_btn.setEnabled(self.source is not None)
         self.play_btn.set_pulsing(self.source is not None and not playing)
-        self.pick.setEnabled(not playing)
-        for b in self.rate_group.buttons():
-            b.setEnabled(not playing)
+        for w in (self.pick, self.custom, *self.kind_group.buttons(), *self.rate_group.buttons()):
+            w.setEnabled(not playing)
         self.play_btn.update()
+        self._update_plan()
 
     def _say(self, text: str, color: str = MUTED) -> None:
         self.status.setText(text)
@@ -1053,7 +1140,8 @@ class SimpleWindow(QMainWindow):
         if self.session:
             self.session.command("quit")
             return
-        if not self.source:
+        plan = self.current_plan()
+        if not plan:
             return
         if not detect.mpv_path():
             QMessageBox.warning(self, "twixt", "The player isn't installed yet.\n\n"
@@ -1061,7 +1149,7 @@ class SimpleWindow(QMainWindow):
             return
         self.play_btn.setEnabled(False)
         self._say("starting…", CYAN)
-        src, prof = str(self.source.path), _playback_profile(self.fps())
+        src, prof = str(self.source.path), plan.profile
 
         def work():
             try:

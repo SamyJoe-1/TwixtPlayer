@@ -216,13 +216,30 @@ exists to handle.
 Double-click **`gui.cmd`**. The first run installs PySide6 on its own.
 
 1. **Choose a video.**
-2. **Pick the frame rate.** Only rates your monitor shows evenly are offered:
-   180 / 90 / 60 on 180 Hz, 144 / 72 on 144 Hz.
-3. **▶ Play.**
+2. **What are you watching:** ★ Auto, Movies / TV, Anime, Sports, or Gaming / YouTube.
+3. **Frame rate:** ★ Auto, one of the rates your monitor shows evenly
+   (180 / 90 / 60 on 180 Hz), or **Custom** with any number you type. A custom rate
+   plays exactly what you typed, with a warning if the monitor can't show it evenly.
+4. **▶ Play.**
 
-That's all there is. It uses the settings Auto-optimize measured on your PC
-if you ever ran it, otherwise the tuned 1440p profile. The ⚙ button opens the
-advanced window (engines, profiles, Auto-optimize). Nobody has to touch it.
+**★ Auto** decides instantly, with no test run, and shows why:
+- **Content** comes from the file name: fansub tags like `[SubsPlease]` or `[Erai-raws]`, or
+  `Title - 05`, mean anime; NBA/F1/UFC/highlights mean sports; gameplay/twitch
+  mean gaming. Otherwise a 30-60 fps video counts as gaming/YouTube and 24 fps as a film.
+- **fps**: the highest even rate for your monitor within what has been *measured*
+  on this PC. That's your own live test (⚙ → Auto-optimize) if you ran one, otherwise
+  the recorded 1440p result (90). Going above that comes with a warning.
+- **Engine**: Sports uses RIFE on the GPU when it's installed (least ghosting);
+  everything else uses MVTools on the CPU.
+
+| Profile | What it changes |
+|---|---|
+| Movies / TV | MVTools defaults: balanced masking, standard cut detection |
+| Anime | stronger artifact masking (hard lines stay put), cuts flagged sooner |
+| Sports | RIFE GPU if installed, else the widest motion search |
+| Gaming / YouTube | lets 60 fps sources through (normally skipped) to reach 180 |
+
+The ⚙ button opens the advanced window. Nobody has to touch it.
 
 ```bash
 python -m twixt gui ["film.mkv"]          # simple

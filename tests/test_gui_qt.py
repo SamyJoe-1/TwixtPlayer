@@ -10,7 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from PySide6.QtCore import QCoreApplication, QElapsedTimer
+    from PySide6.QtCore import QCoreApplication, QElapsedTimer, QEvent
+    from PySide6.QtGui import QFocusEvent
     from PySide6.QtWidgets import QApplication, QMessageBox
 except ImportError:          # pragma: no cover
     QApplication = None
@@ -72,7 +73,7 @@ def test_auto_optimize_runs_and_reports_failure_cleanly():
     w.close()
 
 
-def test_simple_window_is_video_fps_play():
+def test_simple_window_auto_custom_and_profiles():
     if QApplication is None:
         print("  (skipped: PySide6 not installed)")
         return
@@ -80,16 +81,33 @@ def test_simple_window_is_video_fps_play():
     app = QApplication.instance() or QApplication([])
     gui_qt._in_thread = lambda fn, *a: None
     w = gui_qt.SimpleWindow()
-    w.settings.setValue("fps", 90.0)
+    w.settings.setValue("kind", "auto")
+    w.settings.setValue("fps", "auto")
+    w._restore_choices()
     w._on_display(180.0)
     assert not w.play_btn.isEnabled(), "nothing to play yet"
-    shown = [b.property("fps") for b in w.rate_group.buttons() if not b.isHidden()]
-    assert shown == [180.0, 90.0, 60.0], shown
-    assert w.fps() == 90.0, "remembers the last rate"
-    w._on_probed(FILM)
+    shown = [b.property("fps") for b in w.rate_buttons if not b.isHidden()]
+    assert shown == ["auto", 180.0, 90.0, 60.0], shown
+
+    w._on_probed(detect.SourceInfo(Path("[SubsPlease] Frieren - 05 (1080p).mkv"),
+                                   fps=23.976, width=1920, height=1080))
     assert w.play_btn.isEnabled()
-    prof = gui_qt._playback_profile(w.fps())
-    assert prof.resolve_target_fps(FILM.fps, 180.0) == 90.0
+    plan = w.current_plan()
+    assert plan.content == "anime" and plan.fps == 90.0
+    assert "Anime" in w.plan_title.text() and w.plan_warn.isHidden()
+
+    # Pick a ready profile instead of Auto.
+    next(b for b in w.kind_group.buttons() if b.property("kind") == "sports").setChecked(True)
+    assert w.current_plan().content == "sports"
+
+    # Typing a custom number selects Custom and plays exactly that, with a warning.
+    w.custom.setValue(w.custom.value())                  # unchanged number...
+    QApplication.sendEvent(w.custom.lineEdit(), QFocusEvent(QEvent.FocusIn))
+    assert w.custom_btn.isChecked(), "...but clicking into the box selects Custom"
+    w.custom.setValue(120)
+    plan = w.current_plan()
+    assert plan.fps == 120.0 and not plan.profile.snap_to_display
+    assert not w.plan_warn.isHidden() and "judder" in w.plan_warn.text()
     w.close()
 
 
