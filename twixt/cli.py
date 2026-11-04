@@ -459,7 +459,8 @@ def cmd_gui(args) -> int:
               f"one:  python -m pip install PySide6{RESET}")
         from .gui import main as gui_main
         return gui_main()
-    return qt_main([args.file] if getattr(args, "file", None) else [])
+    argv = [args.file] if getattr(args, "file", None) else []
+    return qt_main(argv + (["--advanced"] if getattr(args, "advanced", False) else []))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -556,6 +557,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("profiles", help="list built-in profiles").set_defaults(func=cmd_profiles)
     p_gui = sub.add_parser("gui", help="open the manager window")
     p_gui.add_argument("file", nargs="?", help="video to load straight away")
+    p_gui.add_argument("--advanced", action="store_true",
+                       help="open the full window (engines, profiles, auto-optimize)")
     p_gui.set_defaults(func=cmd_gui)
 
     return parser

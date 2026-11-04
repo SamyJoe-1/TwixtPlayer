@@ -10,6 +10,7 @@ PySide6 is an optional dependency (pip install PySide6). Without it,
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import sys
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import (QEasingCurve, QObject, QProcess, QPropertyAnimation,
-                            QProcessEnvironment, Qt, QTimer, Signal, Property)
+                            QProcessEnvironment, QSettings, Qt, QTimer, Signal, Property)
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFileDialog,
                                QFrame, QGraphicsDropShadowEffect, QGridLayout,
@@ -808,6 +809,296 @@ class TwixtWindow(QMainWindow):
         super().closeEvent(event)
 
 
+# --- the simple window (what opens by default) -------------------------------
+
+def _playback_profile(fps: float) -> profiles.Profile:
+    """The settings behind 'play at N fps' -- no choices asked of the user.
+
+    Uses what Auto-optimize measured on this PC if that exists, otherwise the
+    1440p profile measured when this was built (mvtools, CPU), otherwise the
+    cheapest preset. Only the rate changes.
+    """
+    for name in ("twixt-checked.json", "twixt-1440p.json"):
+        path = detect.ROOT / name
+        if path.is_file():
+            try:
+                base = profiles.Profile.load(path)
+                break
+            except Exception:
+                pass
+    else:
+        base = profiles.get("fast")
+    prof = dataclasses.replace(base)
+    prof.rate_mode, prof.rate_fixed, prof.max_output_fps = "fixed", fps, fps
+    prof.snap_to_display = True
+    return prof
+
+
+def smooth_rates(display_hz: float, source_fps: float = 23.976) -> list[float]:
+    """Rates this monitor shows evenly (display / k), above the film's own."""
+    # At least 60 and at least double the film: below that there is little
+    # motion to smooth and nothing worth choosing.
+    floor = max(60.0, source_fps * 2) - 0.5
+    rates = [display_hz / k for k in range(1, 9) if display_hz / k >= floor]
+    return [round(r, 2) for r in rates][:3] or [display_hz]
+
+
+class SimpleWindow(QMainWindow):
+    """Choose video -> choose fps -> Play. Nothing else on screen."""
+
+    def __init__(self, initial: str | None = None) -> None:
+        super().__init__()
+        self.setWindowTitle("twixt")
+        self.resize(560, 560)
+        self.setMinimumSize(480, 500)
+        self.setAcceptDrops(True)
+        self.settings = QSettings("twixt", "twixt")
+        self.source: detect.SourceInfo | None = None
+        self.display_fps = 0.0
+        self.session: player.Session | None = None
+        self.advanced = None
+        self._bridge = _Bridge()
+        self._bridge.probed.connect(self._on_probed)
+        self._bridge.display.connect(self._on_display)
+        self._bridge.launched.connect(self._on_launched)
+        self._bridge.failed.connect(self._on_failed)
+
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
+        lay = QVBoxLayout(root)
+        lay.setContentsMargins(36, 26, 36, 26)
+        lay.setSpacing(0)
+
+        head = QHBoxLayout()
+        logo = QLabel(
+            f'<span style="font-size:26px;font-weight:800;color:{CYAN}">twi</span>'
+            f'<span style="font-size:26px;font-weight:800;color:{VIOLET}">xt</span>')
+        _glow(logo, CYAN, 22, 90)
+        head.addWidget(logo)
+        head.addStretch(1)
+        gear = QPushButton("⚙")
+        gear.setObjectName("link")
+        gear.setStyleSheet(f"font-size: 18px; color: {MUTED};")
+        gear.setToolTip("Advanced: engines, profiles, auto-optimize")
+        gear.setCursor(Qt.PointingHandCursor)
+        gear.clicked.connect(self.open_advanced)
+        head.addWidget(gear)
+        lay.addLayout(head)
+        lay.addSpacing(26)
+
+        # 1. video
+        step1 = QLabel("1   VIDEO")
+        step1.setObjectName("section")
+        lay.addWidget(step1)
+        lay.addSpacing(10)
+        self.pick = QPushButton("Choose a video…")
+        self.pick.setObjectName("pick")
+        self.pick.setCursor(Qt.PointingHandCursor)
+        self.pick.setMinimumHeight(64)
+        self.pick.setStyleSheet(
+            f"QPushButton#pick {{ background: {PANEL}; border: 1px solid {LINE};"
+            f" border-radius: 14px; font-size: 16px; font-weight: 600; text-align: left;"
+            f" padding: 0 20px; }} QPushButton#pick:hover {{ border-color: {CYAN}; }}")
+        self.pick.clicked.connect(self.choose)
+        lay.addWidget(self.pick)
+        self.meta = QLabel("")
+        self.meta.setObjectName("muted")
+        self.meta.setStyleSheet("font-size: 12px; padding: 6px 4px 0 4px;")
+        lay.addWidget(self.meta)
+        lay.addSpacing(24)
+
+        # 2. fps
+        step2 = QLabel("2   FRAME RATE")
+        step2.setObjectName("section")
+        lay.addWidget(step2)
+        lay.addSpacing(10)
+        self.rates_row = QHBoxLayout()
+        self.rates_row.setSpacing(12)
+        lay.addLayout(self.rates_row)
+        self.rate_group = QButtonGroup(self)
+        self.rate_group.setExclusive(True)
+        self.rate_note = QLabel("")
+        self.rate_note.setObjectName("muted")
+        self.rate_note.setWordWrap(True)
+        self.rate_note.setStyleSheet("font-size: 12px; padding: 8px 4px 0 4px;")
+        lay.addWidget(self.rate_note)
+        lay.addStretch(1)
+
+        # 3. play
+        self.play_btn = GradientButton("▶  Play")
+        self.play_btn.setMinimumHeight(60)
+        self.play_btn.clicked.connect(self.toggle_play)
+        lay.addWidget(self.play_btn)
+        lay.addSpacing(12)
+        self.status = QLabel("")
+        self.status.setAlignment(Qt.AlignCenter)
+        self.status.setObjectName("muted")
+        self.status.setStyleSheet("font-size: 12px;")
+        lay.addWidget(self.status)
+
+        self._make_rate_buttons()
+        self._build_rates([180.0, 90.0, 60.0])
+        self._refresh()
+        _in_thread(lambda: self._bridge.display.emit(detect.display_refresh_hz()))
+        self._watch = QTimer(self)
+        self._watch.timeout.connect(self._poll)
+        self._watch.start(500)
+        if initial:
+            self.open_file(initial)
+
+    # --- rates -----------------------------------------------------------
+
+    def _make_rate_buttons(self) -> None:
+        """Three fixed slots, relabelled per monitor -- never rebuilt."""
+        for _ in range(3):
+            b = QPushButton()
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumHeight(78)
+            b.setStyleSheet(
+                f"QPushButton {{ background: {PANEL}; border: 1px solid {LINE}; border-radius: 14px;"
+                f" font-size: 20px; font-weight: 800; }}"
+                f" QPushButton:hover {{ border-color: #3a4260; }}"
+                f" QPushButton:checked {{ border: 1.5px solid {CYAN}; color: {CYAN};"
+                f" background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+                f" stop:0 rgba(0,229,255,0.13), stop:1 rgba(168,85,247,0.13)); }}")
+            self.rate_group.addButton(b)
+            self.rates_row.addWidget(b)
+        self.rate_group.buttonToggled.connect(self._on_rate)
+
+    def _build_rates(self, rates: list[float]) -> None:
+        wanted = float(self.settings.value("fps", 90.0))
+        pick = min(rates, key=lambda r: abs(r - wanted))
+        for b, rate in zip(self.rate_group.buttons(), rates + [None] * 3):
+            b.setVisible(rate is not None)
+            if rate is None:
+                continue
+            b.setText(f"{rate:g}\nfps")
+            b.setProperty("fps", rate)
+            if rate == pick:
+                b.setChecked(True)
+        self._on_rate()
+
+    def fps(self) -> float:
+        b = self.rate_group.checkedButton()
+        return float(b.property("fps")) if b else 90.0
+
+    def _on_rate(self, *_):
+        fps = self.fps()
+        self.settings.setValue("fps", fps)
+        hz = self.display_fps or 0
+        note = (f"Your monitor runs at {hz:g} Hz. These rates divide it exactly, "
+                "so motion stays even.") if hz else ""
+        if hz > 120 and hz % 120:
+            note += "  For 120 fps, set the monitor to 120 Hz in Windows display settings."
+        self.rate_note.setText(note)
+
+    def _on_display(self, hz: float) -> None:
+        self.display_fps = hz
+        src = self.source.fps if self.source else 23.976
+        self._build_rates(smooth_rates(hz, src))
+
+    # --- video -----------------------------------------------------------
+
+    def choose(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a video", str(self.settings.value("dir", "")),
+            "Videos (" + " ".join("*" + e for e in sorted(VIDEO_EXT)) + ");;All files (*.*)")
+        if path:
+            self.open_file(path)
+
+    def open_file(self, path: str) -> None:
+        self.settings.setValue("dir", str(Path(path).parent))
+        self.pick.setText("🎬  " + Path(path).name)
+        self.meta.setText("reading…")
+        _in_thread(lambda: self._bridge.probed.emit(detect.probe(path)))
+
+    def _on_probed(self, info: detect.SourceInfo) -> None:
+        self.source = info
+        bits = [f"{info.width}×{info.height}" if info.width else "",
+                info.codec.upper(), f"{info.fps:.3f} fps"]
+        self.meta.setText("   ·   ".join(b for b in bits if b))
+        if self.display_fps:
+            self._build_rates(smooth_rates(self.display_fps, info.fps))
+        self._refresh()
+
+    def dragEnterEvent(self, e) -> None:
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e) -> None:
+        for url in e.mimeData().urls():
+            if url.toLocalFile():
+                self.open_file(url.toLocalFile())
+                break
+
+    # --- play ------------------------------------------------------------
+
+    def _refresh(self) -> None:
+        playing = self.session is not None
+        self.play_btn.setText("■  Stop" if playing else "▶  Play")
+        self.play_btn.setEnabled(self.source is not None)
+        self.play_btn.set_pulsing(self.source is not None and not playing)
+        self.pick.setEnabled(not playing)
+        for b in self.rate_group.buttons():
+            b.setEnabled(not playing)
+        self.play_btn.update()
+
+    def _say(self, text: str, color: str = MUTED) -> None:
+        self.status.setText(text)
+        self.status.setStyleSheet(f"font-size: 12px; color: {color};")
+
+    def toggle_play(self) -> None:
+        if self.session:
+            self.session.command("quit")
+            return
+        if not self.source:
+            return
+        if not detect.mpv_path():
+            QMessageBox.warning(self, "twixt", "The player isn't installed yet.\n\n"
+                                "Run bootstrap.ps1 once, then try again.")
+            return
+        self.play_btn.setEnabled(False)
+        self._say("starting…", CYAN)
+        src, prof = str(self.source.path), _playback_profile(self.fps())
+
+        def work():
+            try:
+                self._bridge.launched.emit(player.launch(src, prof))
+            except Exception as exc:
+                self._bridge.failed.emit(str(exc))
+        _in_thread(work)
+
+    def _on_launched(self, session: player.Session) -> None:
+        self.session = session
+        self._say(f"playing at {session.target_fps:g} fps   ·   TAB in the player = before/after", GOOD)
+        self._refresh()
+
+    def _on_failed(self, message: str) -> None:
+        self._say("couldn't start", BAD)
+        self._refresh()
+        QMessageBox.critical(self, "twixt", message)
+
+    def _poll(self) -> None:
+        if self.session and self.session.process.poll() is not None:
+            self.session.script.unlink(missing_ok=True)
+            self.session.script.with_suffix(".conf").unlink(missing_ok=True)
+            self.session = None
+            self._say("")
+            self._refresh()
+
+    def open_advanced(self) -> None:
+        self.advanced = TwixtWindow(str(self.source.path) if self.source else None)
+        self.advanced.show()
+        _dark_title_bar(self.advanced)
+
+    def closeEvent(self, event) -> None:
+        if self.session:
+            self.session.command("quit")
+        super().closeEvent(event)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -815,7 +1106,11 @@ def main(argv: list[str] | None = None) -> int:
     app.setStyleSheet(QSS)
     if "Segoe UI Variable Text" not in QFontDatabase.families():
         app.setFont(QFont("Segoe UI", 10))
-    win = TwixtWindow(argv[0] if argv else None)
+    if "--advanced" in argv:
+        argv.remove("--advanced")
+        win = TwixtWindow(argv[0] if argv else None)
+    else:
+        win = SimpleWindow(argv[0] if argv else None)
     win.show()
     _dark_title_bar(win)
     return app.exec()

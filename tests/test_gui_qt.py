@@ -72,6 +72,37 @@ def test_auto_optimize_runs_and_reports_failure_cleanly():
     w.close()
 
 
+def test_simple_window_is_video_fps_play():
+    if QApplication is None:
+        print("  (skipped: PySide6 not installed)")
+        return
+    from twixt import gui_qt
+    app = QApplication.instance() or QApplication([])
+    gui_qt._in_thread = lambda fn, *a: None
+    w = gui_qt.SimpleWindow()
+    w.settings.setValue("fps", 90.0)
+    w._on_display(180.0)
+    assert not w.play_btn.isEnabled(), "nothing to play yet"
+    shown = [b.property("fps") for b in w.rate_group.buttons() if not b.isHidden()]
+    assert shown == [180.0, 90.0, 60.0], shown
+    assert w.fps() == 90.0, "remembers the last rate"
+    w._on_probed(FILM)
+    assert w.play_btn.isEnabled()
+    prof = gui_qt._playback_profile(w.fps())
+    assert prof.resolve_target_fps(FILM.fps, 180.0) == 90.0
+    w.close()
+
+
+def test_smooth_rates_per_monitor():
+    if QApplication is None:
+        return
+    from twixt.gui_qt import smooth_rates
+    assert smooth_rates(180.0) == [180.0, 90.0, 60.0]
+    assert smooth_rates(144.0) == [144.0, 72.0]
+    assert smooth_rates(120.0) == [120.0, 60.0]
+    assert smooth_rates(60.0) == [60.0]
+
+
 if __name__ == "__main__":
     failed = 0
     for fname, fn in sorted(globals().items()):
