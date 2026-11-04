@@ -26,19 +26,55 @@ def test_all_presets_generate_valid_python():
         ast.parse(_script(name))
 
 
-def test_rife_receives_snapped_multiplier():
-    calls, _ = mockvs.run(_script("neural"), 23.976, 180.0)
-    rife = mockvs.find(calls, "vsmlrt.RIFE")
-    assert len(rife) == 1, "RIFE should be invoked exactly once"
-    assert rife[0]["multi"] == Fraction(15, 2)
-    assert rife[0]["video_player"] is True, "playback path must use low-latency ordering"
+def test_rife_runs_one_native_merge_without_python_callbacks():
+    """vsmlrt.RIFE's video-player path runs three Python FrameEval callbacks
+    per output frame (one building a new BlankClip each time); they serialise
+    on the GIL and starve the GPU. The graph must be native: one RIFEMerge,
+    selection via akarin, no FrameEval anywhere."""
+    calls, ns = mockvs.run(_script("neural"), 23.976, 180.0)
+    assert ns["MULTI"] == Fraction(15, 2)
+    assert not mockvs.find(calls, "vsmlrt.RIFE"), "must not use the FrameEval-based wrapper"
+    assert len(mockvs.find(calls, "vsmlrt.RIFEMerge")) == 1, "one engine instance"
+    assert not mockvs.find(calls, "std.FrameEval"), "no per-frame Python"
+    assert mockvs.find(calls, "akarin.Select"), "scene cuts picked natively"
 
 
-def test_rife_roundtrips_through_rgbs_and_back():
+def test_rife_phase_layout_for_fractional_multiplier():
+    """15/4: four source frames make fifteen output frames; one of the fifteen
+    phases lands exactly on a source frame, fourteen are interpolated."""
+    calls, _ = mockvs.run(_script("neural", rate_mode="fixed", rate_fixed=90.0), 23.976, 180.0)
+    selects = mockvs.find(calls, "std.SelectEvery")
+    assert all(kw["cycle"] in (4, 14) for kw in selects)
+    masks = [kw for kw in mockvs.find(calls, "std.BlankClip") if kw.get("format") == "GRAYH"]
+    assert len(masks) == 14
+    tps = sorted(round(kw["color"] * 15) for kw in masks)
+    assert tps == sorted(((j * 4) % 15) for j in range(15) if (j * 4) % 15), tps
+
+
+def test_rife_roundtrips_through_rgbh_and_back():
     calls, _ = mockvs.run(_script("neural"))
     fmts = [kw.get("format") for fn, kw in calls if fn == "resize.Bicubic"]
-    assert fmts[0] == "RGBS", "RIFE needs float RGB input"
+    assert fmts[0] == "RGBH", "fp16 engine gets fp16 RGB: half the bytes of RGBS"
     assert fmts[-1] == "YUV420P8", "must convert back for the player"
+
+
+def test_rife_pads_to_the_models_multiple():
+    assert engine_rife_multiple(410) == 32
+    assert engine_rife_multiple(426) == 64
+    assert engine_rife_multiple(4251) == 128
+    assert engine_rife_multiple(4252) == 64
+
+
+def engine_rife_multiple(model_id):
+    import tests.mockvs as m
+    m.install()
+    try:
+        ns = {"video_in": m.Clip(1920, 1080, Fraction(24, 1)),
+              "container_fps": 24.0, "display_fps": 180.0}
+        exec(compile(_script("neural"), "<g>", "exec"), ns)
+        return ns["_rife_pad_multiple"](model_id)
+    finally:
+        m.uninstall()
 
 
 def test_falls_back_to_ncnn_when_vsmlrt_missing():
@@ -73,6 +109,31 @@ def test_mvtools_graph_shape():
     fps = mockvs.find(calls, "mv.FlowFPS")[0]
     assert fps["num"] / fps["den"] <= 180.0
     assert fps["thscd1"] == 400
+    assert fps["thscd2"] == 130, "mvtools default; tighter turns fast pans into 'cuts'"
+
+
+def test_mvtools_rate_is_exact_rational():
+    calls, _ = mockvs.run(_script("film"), 23.976, 180.0)
+    fps = mockvs.find(calls, "mv.FlowFPS")[0]
+    assert Fraction(fps["num"], fps["den"]) == Fraction(24000, 1001) * Fraction(15, 2)
+
+
+def test_mvtools_output_is_not_reconverted_per_output_frame():
+    """Converting the 8-bit result back to the source format ran a full-frame
+    resize at the OUTPUT rate and restored nothing."""
+    calls, _ = mockvs.run(_script("film"))
+    names = [fn for fn, _ in calls]
+    assert "resize.Bicubic" not in names[names.index("mv.FlowFPS"):]
+
+
+def test_mvtools_masking_runs_the_right_way():
+    """FlowFPS ml: greater values = weaker occlusion mask (MVTools2 docs)."""
+    ml = {}
+    for level in ("disabled", "weak", "average", "strong"):
+        calls, _ = mockvs.run(_script("film", artifact_masking=level))
+        ml[level] = mockvs.find(calls, "mv.FlowFPS")[0]["ml"]
+    assert ml["disabled"] > ml["weak"] > ml["average"] > ml["strong"]
+    assert ml["average"] == 100.0, "mvtools default"
 
 
 def test_mvtools_overlap_is_even_and_below_block_size():
@@ -118,7 +179,11 @@ def test_high_resolution_profile_buys_speed_with_whole_pixel_vectors():
 
 def test_4k_profile_caps_output_rate():
     p = profiles.get("4k")
+    # 120 is the cap; 180 Hz cannot show 120 evenly, so it snaps to 90.
+    assert p.resolve_target_fps(23.976, 180.0) == 90.0
+    p.snap_to_display = False
     assert p.resolve_target_fps(23.976, 180.0) == 120.0
+    assert profiles.get("4k").resolve_target_fps(23.976, 120.0) == 120.0
 
 
 def test_svpflow_backend_builds_expected_chain():

@@ -31,6 +31,7 @@ class Clip:
         self.fps = (fps if isinstance(fps, Fraction)
                     else Fraction(fps).limit_denominator(1000000))
         self.format = fmt or Format("YUV420P8")
+        self.num_frames = 1000
         self.output = False
 
     def set_output(self, index=0):
@@ -52,7 +53,13 @@ class _Namespace:
             base = next((a for a in args if isinstance(a, Clip)), None) or Clip()
             out = Clip(base.width, base.height, base.fps, base.format)
             if "format" in kwargs:
-                out.format = Format(kwargs["format"])
+                fid = kwargs["format"]
+                bits = 16 if str(fid).endswith("H") else 32 if str(fid).endswith("S") else 8
+                family = "RGB" if str(fid).startswith("RGB") else "YUV"
+                out.format = Format(fid, bits, family)
+            if "fpsnum" in kwargs and kwargs.get("fpsden"):
+                from fractions import Fraction
+                out.fps = Fraction(kwargs["fpsnum"], kwargs["fpsden"])
             if "width" in kwargs:
                 out.width = kwargs["width"]
             if "height" in kwargs:
@@ -73,6 +80,10 @@ def install(with_vsmlrt: bool = True):
     vs = types.ModuleType("vapoursynth")
     vs.core = _Core()
     vs.RGBS = "RGBS"
+    vs.RGBH = "RGBH"
+    vs.GRAYS = "GRAYS"
+    vs.GRAYH = "GRAYH"
+    vs.RGB = "RGB"
     vs.YUV420P8 = "YUV420P8"
     vs.YUV = "YUV"
     vs.GRAY = "GRAY"
@@ -91,8 +102,13 @@ def install(with_vsmlrt: bool = True):
             CALLS.append(("vsmlrt.RIFE", dict(kw)))
             return clip
 
+        def RIFEMerge(a, b, mask, **kw):
+            CALLS.append(("vsmlrt.RIFEMerge", dict(kw)))
+            return Clip(a.width, a.height, a.fps, a.format)
+
         mlrt.Backend = _Backend
         mlrt.RIFE = RIFE
+        mlrt.RIFEMerge = RIFEMerge
         sys.modules["vsmlrt"] = mlrt
     else:
         sys.modules.pop("vsmlrt", None)

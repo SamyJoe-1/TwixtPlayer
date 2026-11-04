@@ -58,8 +58,22 @@ def test_already_fast_source_is_not_multiplied():
 def test_cap_is_respected_over_the_display_rate():
     p = profiles.get("film")
     p.max_output_fps = 120.0
+    p.snap_to_display = False
     assert p.resolve_target_fps(24.0, 180.0) == 120.0
     assert p.multiplier(24.0, 180.0) == Fraction(5)
+
+
+def test_target_snaps_to_an_even_cadence():
+    """120 fps on 180 Hz is held 1-2-1-2 refreshes -- judder. Snap to 180/k."""
+    p = profiles.get("film")
+    p.max_output_fps = 120.0
+    assert p.resolve_target_fps(24.0, 180.0) == 90.0
+    assert p.resolve_target_fps(24.0, 120.0) == 120.0
+    assert p.resolve_target_fps(24.0, 144.0) == 72.0
+    p.max_output_fps = 180.0
+    assert p.resolve_target_fps(23.976, 180.0) == 180.0
+    assert profiles.snap_to_cadence(60.0, 180.0) == 60.0
+    assert profiles.snap_to_cadence(119.88, 120.0) == 120.0
 
 
 def test_fixed_and_multiple_rate_modes():

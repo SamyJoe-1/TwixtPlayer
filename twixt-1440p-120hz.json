@@ -1,6 +1,6 @@
 {
   "name": "tuned 2560x1440 @ 120fps (120 Hz panel)",
-  "description": "Same engine as twixt-1440p.json but 120 fps out: 165 fps median, 159 worst, 1.33x. Only use this with the monitor set to 120 Hz, where it is a perfect 1:1 cadence. At 180 Hz it is 1.5 refreshes per frame, which alternates 1-2-1-2 and beats visibly -- worse than 90 fps despite the higher number.",
+  "description": "120 fps out for a panel SET TO 120 Hz (5x a 24p film, 1:1 cadence). On a 180 Hz panel this profile snaps down to 90 automatically, because 120 on 180 Hz alternates 1-2-1-2 refreshes.",
   "rate_mode": "fixed",
   "rate_multiplier": "2",
   "rate_fixed": 120.0,
@@ -21,7 +21,7 @@
   "refine": true,
   "wide_search": false,
   "artifact_masking": "average",
-  "scene_change_threshold": 200,
+  "scene_change_threshold": 400,
   "scene_detection": true,
   "blend_on_scene_change": false,
   "motion_blur": 0.0,
@@ -29,5 +29,6 @@
   "threads": 0,
   "num_streams": 2,
   "bypass_above_fps": 59.0,
-  "audio_delay": -0.8
+  "audio_delay": -0.8,
+  "snap_to_display": true
 }

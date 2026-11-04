@@ -97,12 +97,17 @@ def _vf_arg(script: Path, profile: Profile, labelled: bool = True) -> str:
     # pinned a twenty-core box to two cores and left mvtools far short of real
     # time -- the video froze while audio ran on.
     concurrent = profile.filter_concurrency()
-    # buffered-frames is the decoded-input runway ahead of the filter. It has to
-    # span whatever range the in-flight requests reach across -- worst case one
-    # input frame per request, when the multiplier is close to 1 -- or mpv
-    # refuses with "frame too far in the past". Bounded so that a 4K source does
-    # not park a gigabyte of decoded frames in memory.
-    buffered = min(64, concurrent + 8)
+    # buffered-frames is how far back the filter may reach into decoded input.
+    # mpv's manual (vf vapoursynth): "both option values are multiplied to get
+    # the final buffer size" and "Increasing this buffer will not improve
+    # performance. Rather, it will waste memory, and slow down seeks". This used
+    # to be concurrent+8 = 28 on a 20-thread CPU, i.e. 28 x 20 = 560 decoded
+    # frames held -- about 3 GB at 1440p 8-bit, 6 GB at 10-bit -- refilled on
+    # every seek. The window only has to cover what the in-flight requests can
+    # reach (one input frame per request in the worst case, plus the motion
+    # search neighbours), so size buffered so that buffered x concurrent >=
+    # concurrent + 8, with mpv's own default of 4 as the floor.
+    buffered = max(4, -(-(concurrent + 8) // concurrent))
     # The label lets us toggle this exact filter at runtime without disturbing
     # anything else in the chain.
     prefix = f"@{FILTER_LABEL}:" if labelled else ""

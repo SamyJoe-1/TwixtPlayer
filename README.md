@@ -84,6 +84,36 @@ bursts too small to keep the card busy — pipeline overhead, not GPU compute.
 
 MVTools is CPU-only, which also leaves the GPU completely free.
 
+## Smoothness fixes (2026-11-04)
+
+What was making 1440p stutter and ghost. Every item below comes from the
+documentation or source of the component involved, not from guessing:
+
+| Problem | Cause | Fix |
+|---|---|---|
+| 120 fps "laggy" on the 180 Hz panel | 180 / 120 = 1.5, so frames are held 1, 2, 1, 2 refreshes: judder even when every frame is on time (mpv documents the same 2-3-2-3 effect for 24p on 60 Hz) | Target snaps to `display / k` (180, 90, 60). For 120 set the monitor to 120 Hz; for 144, 144 Hz. `--no-snap` turns snapping off |
+| `twixt-1440p.json` said 90 fps | it actually asked for `rate_fixed: 120` | now 90 |
+| Hitch on fast motion | `thscd1=200` / `thscd2=90`, tighter than MVTools' defaults 400 / 130 (51%). Fast pans counted as scene cuts, and on a cut FlowFPS **repeats the previous frame** | MVTools defaults |
+| GPU at ~13% with RIFE | `vsmlrt.RIFE`'s video-player path for fractional rates runs three Python `FrameEval` callbacks per **output** frame (one builds a new `BlankClip` each time), so everything waits on the Python GIL | own native graph: `SelectEvery` / `Interleave` / `Loop` + one `RIFEMerge`, with no per-frame Python. Also fp16 RGB (half the bytes of RGBS) and padding that matches each model's size requirement |
+| Memory and slow seeks | mpv **multiplies** `buffered-frames` by `concurrent-frames`: 28 x 20 = 560 held 1440p frames (3 to 6 GB) | window sized to what the requests can reach |
+| Extra work at the output rate | the 8-bit MVTools result was converted back to the 10-bit source format on every output frame, which restored nothing | sent to mpv as 8-bit |
+| Artifact masking backwards | FlowFPS `ml`: greater = *weaker* mask. `strong` was the weakest | mapped the right way round |
+
+**Ghosting and block tearing on fast motion** are built into block-matching
+interpolation (MVTools, and SVP's own block engine): 32 px blocks moving as
+rigid pieces, plus blended fallbacks where vectors fail. The fix that
+competing tools use is neural interpolation on the GPU. SVP's RIFE mode runs
+this same vs-mlrt / TensorRT stack. Now that the GPU is no longer starved, try it:
+
+```bash
+python -m twixt tune "film.mkv" --backend rife
+```
+
+Then drag the file onto `play-rife.cmd`. The first run on a new frame size
+builds a TensorRT engine, which takes minutes once. Re-run `bootstrap.ps1` so the
+`akarin` plugin is installed. Without it, scene-cut selection falls back to a
+Python callback.
+
 ## Install
 
 ```powershell
@@ -257,6 +287,6 @@ tests/
   mockvs.py     fake VapourSynth so the filter graph can be tested anywhere
 ```
 
-Run the tests with `python tests/test_engine.py` and `python tests/test_player.py`.
+Run the tests with `python tests/test_engine.py`, `python tests/test_player.py`, `python tests/test_profiles.py`, and `python tests/test_rife_graph_realvs.py`. The last one runs the RIFE graph in real VapourSynth (`pip install vapoursynth`) and skips if it is missing.
 
 [vs-mlrt]: https://github.com/AmusementClub/vs-mlrt

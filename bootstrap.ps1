@@ -75,10 +75,10 @@ $Manifest = @(
     @{ Name = 'plugins'
        Tier = 'core'
        Kind = 'vsrepo'
-       Packages = @('mv', 'bs')
+       Packages = @('mv', 'bs', 'akarin')
        Dest = $Plugins
        Probe = 'libmvtools.dll'
-       Why  = 'MVTools backend, plus the source filter used for benchmarking' }
+       Why  = 'MVTools backend, the benchmark source filter, and akarin (native per-frame selection for the RIFE graph)' }
 
     @{ Name = 'vsmlrt'
        Tier = 'full'

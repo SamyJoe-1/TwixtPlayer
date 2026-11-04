@@ -29,12 +29,51 @@ GRID = {
 
 # How aggressively to hide interpolation artifacts. Higher = falls back to
 # blending/frame-repeat sooner, so fewer warps but less smoothness.
+# This is SVP's `mask.area` scale, where a bigger number means more masking.
 ARTIFACT_MASKING = {
     "disabled": 0,
     "weak": 50,
     "average": 100,
     "strong": 150,
 }
+
+# MVTools' FlowFPS `ml` runs the OTHER way: "The greater values are
+# corresponded to more weak occlusion mask" (MVTools2 docs, MFlowFps). Feeding
+# the SVP scale straight in -- which this code used to do -- made "strong" the
+# weakest mask and "disabled" (clamped to ml=1) the strongest. 100 is MVTools'
+# own default and stays the midpoint.
+MVTOOLS_ML = {
+    "disabled": 1000.0,
+    "weak": 200.0,
+    "average": 100.0,
+    "strong": 50.0,
+}
+
+# MVTools' scene-change defaults (MVTools2 docs): a block counts as changed
+# above SAD 400 (per 8x8), and a frame is a cut once 130/255 = 51% of blocks
+# changed. On a cut FlowFPS does not interpolate -- it repeats the previous
+# frame (blend=False) -- so thresholds set tighter than this make every fast
+# pan look like a cut and stutter exactly when motion is fastest.
+SCENE_CHANGE_RATIO = 130
+
+
+def snap_to_cadence(target: float, display_fps: float) -> float:
+    """Largest rate <= target that divides the panel evenly (display / k).
+
+    A frame rate the panel cannot divide is shown in an uneven pattern: 120 fps
+    on 180 Hz holds frames for 1, 2, 1, 2 refreshes, which reads as judder even
+    though every frame was made in time. mpv documents the same effect for
+    24 fps on 60 Hz ("a 2-3-2-3-... pattern", --video-sync-max-video-change),
+    and display-resample only absorbs differences of about 1%.
+    """
+    if display_fps <= 0 or target <= 0:
+        return target
+    if target >= display_fps * 0.99:
+        return display_fps
+    k = 2
+    while display_fps / k > target * 1.01:
+        k += 1
+    return display_fps / k
 
 
 @dataclass
@@ -52,6 +91,10 @@ class Profile:
     rate_multiplier: str = "2"        # parsed as Fraction, used when rate_mode="multiple"
     rate_fixed: float = 60.0          # used when rate_mode="fixed"
     max_output_fps: float = 180.0     # hard ceiling, protects against 4K meltdowns
+    # Round the target down to display/k so every frame is held for the same
+    # number of refreshes. Off = use the exact number asked for, even if the
+    # panel has to show it unevenly.
+    snap_to_display: bool = True
 
     # --- engine ------------------------------------------------------------
     backend: Backend = "rife"
@@ -84,7 +127,7 @@ class Profile:
     motion_blur: float = 0.0          # 0 = off; adds shutter-like blur to generated frames
 
     # --- performance -------------------------------------------------------
-    downscale_above_height: int = 0   # e.g. 1440 -> estimate motion on a smaller copy
+    downscale_above_height: int = 0   # above this height mvtools uses pel=1 (faster, coarser)
     threads: int = 0                  # 0 = auto
     num_streams: int = 2              # RIFE/TensorRT concurrent streams
 
@@ -109,7 +152,10 @@ class Profile:
             target = source_fps * float(Fraction(self.rate_multiplier))
         else:
             target = self.rate_fixed
-        return min(target, self.max_output_fps)
+        target = min(target, self.max_output_fps)
+        if self.snap_to_display:
+            target = snap_to_cadence(target, display_fps)
+        return target
 
     def filter_concurrency(self) -> int:
         """How many frames the host should keep in flight through the filter.

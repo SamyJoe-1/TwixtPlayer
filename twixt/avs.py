@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .profiles import ARTIFACT_MASKING, GRID, Profile
+from .profiles import GRID, MVTOOLS_ML, SCENE_CHANGE_RATIO, Profile
 
 ROOT = Path(__file__).resolve().parent.parent
 AVS_DIR = ROOT / "runtime" / "avisynth"
@@ -58,7 +58,7 @@ if (fps > {bypass}) {{
     res = MFlowFps(src, sup, bv, fv, \\
              num=FramerateNumerator(src) * mult, den=FramerateDenominator(src), \\
              mask=2, ml={ml}, blend={blend}, \\
-             thscd1={thscd1}, thscd2=90)
+             thscd1={thscd1}, thscd2={thscd2})
 {proof}
     res
     Prefetch({threads})
@@ -125,9 +125,10 @@ def generate_script(profile: Profile, threads: int | None = None,
         search=5 if profile.wide_search else 3,
         searchparam=profile.search_radius,
         refine=refine,
-        ml=max(1, ARTIFACT_MASKING[profile.artifact_masking]),
+        ml=f"{MVTOOLS_ML[profile.artifact_masking]:g}",
         blend="true" if profile.blend_on_scene_change else "false",
         thscd1=profile.scene_change_threshold,
+        thscd2=SCENE_CHANGE_RATIO,
         threads=threads,
     )
 

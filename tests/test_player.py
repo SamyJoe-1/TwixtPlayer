@@ -58,7 +58,23 @@ def test_cpu_backend_gets_the_whole_machine():
     profile.num_streams = 2
     vf = next(a for a in _args(profile) if a.startswith("--vf="))
     assert f"concurrent-frames={os.cpu_count()}" in vf
-    assert f"buffered-frames={min(64, os.cpu_count() + 8)}" in vf
+    assert f"buffered-frames={_buffered(os.cpu_count())}" in vf
+
+
+def _buffered(concurrent):
+    return max(4, -(-(concurrent + 8) // concurrent))
+
+
+def test_buffer_window_is_not_multiplied_into_gigabytes():
+    """mpv multiplies buffered-frames by concurrent-frames. The window must
+    cover the in-flight requests and not much more."""
+    for threads in (1, 2, 6, 20, 32):
+        profile = profiles.get("film")
+        profile.threads = threads
+        vf = next(a for a in _args(profile) if a.startswith("--vf="))
+        buffered = int(vf.split("buffered-frames=")[1].split(":")[0])
+        assert buffered * threads >= threads + 8
+        assert buffered * threads <= max(4 * threads, 18)
 
 
 def test_explicit_thread_count_wins():
@@ -66,7 +82,7 @@ def test_explicit_thread_count_wins():
     profile.threads = 6
     vf = next(a for a in _args(profile) if a.startswith("--vf="))
     assert "concurrent-frames=6" in vf
-    assert "buffered-frames=14" in vf
+    assert "buffered-frames=4" in vf
 
 
 def test_rife_concurrency_covers_the_cpu_side_of_the_graph():
@@ -79,7 +95,7 @@ def test_rife_concurrency_covers_the_cpu_side_of_the_graph():
     expected = max(4, min(os.cpu_count() or 4, 9))
     vf = next(a for a in _args(profile) if a.startswith("--vf="))
     assert f"concurrent-frames={expected}" in vf
-    assert f"buffered-frames={min(64, expected + 8)}" in vf
+    assert f"buffered-frames={_buffered(expected)}" in vf
     assert "concurrent-frames=3" not in vf
 
 

@@ -52,6 +52,8 @@ def _apply_overrides(profile: profiles.Profile, args) -> profiles.Profile:
         profile.grid = args.grid
     if args.masking:
         profile.artifact_masking = args.masking
+    if getattr(args, "no_snap", False):
+        profile.snap_to_display = False
     return profile
 
 
@@ -117,6 +119,15 @@ def cmd_play(args) -> int:
     display = detect.display_refresh_hz()
     target = profile.resolve_target_fps(info.fps, display)
     multi = profile.multiplier(info.fps, display)
+
+    if profile.snap_to_display:
+        unsnapped = dataclasses.replace(profile, snap_to_display=False)
+        asked = unsnapped.resolve_target_fps(info.fps, display)
+        if abs(asked - target) > 0.5:
+            print(f"\n  {DIM}{asked:g} fps does not divide a {display:g} Hz panel evenly "
+                  f"(frames would be held unevenly = judder), so playing {target:g} fps.\n"
+                  f"  For {asked:g} fps set the monitor to a multiple of it, "
+                  f"or pass --no-snap.{RESET}")
 
     print(f"\n  {BOLD}{source.name}{RESET}")
     print(f"  {DIM}{info.width}x{info.height} {info.codec} "
@@ -191,8 +202,11 @@ def cmd_tune(args) -> int:
     # choke on rather than rebuild. Clear those before measuring anything.
     detect.prune_failed_engines()
 
-    multiples = [m for m in (2, 3, 4, 5, 6, 7.5, 8)
-                 if info.fps * m <= display + 0.5]
+    # Candidate rates are the ones the panel can show evenly -- display/1,
+    # display/2, ... -- not multiples of the source. 5x a 24p film is 120 fps,
+    # which a 180 Hz panel holds 1-2-1-2 refreshes: it can pass this benchmark
+    # and still judder on screen.
+    targets = [display / k for k in range(1, 9) if display / k >= info.fps * 1.5]
 
     # Which backend wins is not predictable from first principles -- on some
     # machines the neural path is faster, on others block motion is. Measure
@@ -243,15 +257,15 @@ def cmd_tune(args) -> int:
             grids = [base.grid]
 
         for grid in grids:
-            for multiple in sorted(multiples, reverse=True):
+            for target in sorted(targets, reverse=True):
+                multiple = target / info.fps if info.fps else 0.0
                 profile = dataclasses.replace(base)
                 profile.backend = backend
                 profile.grid = grid
                 profile.rate_mode = "fixed"
-                profile.rate_fixed = info.fps * multiple
+                profile.rate_fixed = target
                 profile.max_output_fps = display
-
-                target = min(info.fps * multiple, display)
+                profile.snap_to_display = True
                 shown_grid = grid if backend == "mvtools" else "-"
                 # Say what is being measured *before* measuring it. A run can
                 # take anywhere from a second to several minutes, and a table
@@ -309,7 +323,7 @@ def cmd_tune(args) -> int:
     out = Path(args.output) if args.output else Path("twixt-tuned.json")
     winner.save(out)
 
-    print(f"  {BOLD}best: {r['target_fps']:.1f} fps ({multiple:g}x source) "
+    print(f"  {BOLD}best: {r['target_fps']:.1f} fps ({multiple:.2f}x source) "
           f"on {backend}{RESET}")
     print(f"  {DIM}headroom {r['headroom']:.2f}x   saved to {out}{RESET}\n")
     print("  play this file:")
@@ -360,6 +374,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--grid", choices=["small", "medium", "large"])
         sp.add_argument("--masking",
                         choices=["disabled", "weak", "average", "strong"])
+        sp.add_argument("--no-snap", action="store_true",
+                        help="use the exact rate asked for even if the panel "
+                             "cannot show it evenly (e.g. 120 fps on 180 Hz)")
 
     p_play = sub.add_parser("play", help="play a file with interpolation")
     p_play.add_argument("file")
