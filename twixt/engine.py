@@ -202,8 +202,17 @@ def _mark_scene_changes(c):
     next -- the single most objectionable interpolation artifact.
     """
     try:
+        # Only a per-frame yes/no comes out of this -- no vectors are reused --
+        # so it can run on a small copy (unlike FlowFPS, which needs vectors of
+        # the clip it renders). thSCD1 is normalised to 8x8 blocks (MVTools2
+        # docs), so the threshold keeps its meaning. At 1440p this is ~7x fewer
+        # pixels through Super/Analyse for the same cut decisions.
+        if c.width > CFG["scene_detect_width"]:
+            w = CFG["scene_detect_width"]
+            h = max(2, int(round(c.height * w / c.width / 2)) * 2)
+            c = core.resize.Bilinear(c, width=w, height=h)
         sup = core.mv.Super(c, pel=1, sharp=0, rfilter=2)
-        vec = core.mv.Analyse(sup, isb=True, blksize=32, overlap=0, search=0)
+        vec = core.mv.Analyse(sup, isb=True, blksize=16, overlap=0, search=0)
         return core.mv.SCDetection(
             c, vec,
             thscd1=CFG["scene_change_threshold"], thscd2=CFG["scene_change_ratio"],
@@ -583,6 +592,7 @@ def build_config(profile: Profile, source_fps: float, display_fps: float,
         "mvtools_ml": MVTOOLS_ML[profile.artifact_masking],
         "scene_change_threshold": profile.scene_change_threshold,
         "scene_change_ratio": SCENE_CHANGE_RATIO,
+        "scene_detect_width": 960,
         "scene_detection": profile.scene_detection,
         "blend_on_scene_change": profile.blend_on_scene_change,
         "motion_blur": profile.motion_blur,

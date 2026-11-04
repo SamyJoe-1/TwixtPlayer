@@ -41,8 +41,11 @@ def test_hardware_decoding_reads_back_to_system_memory():
     # hands back a normal software frame, which is both safe and much cheaper
     # than decoding 1440p AV1 on the same cores the filter wants.
     args = _args()
-    assert "--hwdec=auto-copy" in args
-    assert "--hwdec=auto" not in args, "zero-copy would hand the filter GPU surfaces"
+    hw = next(a for a in args if a.startswith("--hwdec="))
+    methods = hw.split("=", 1)[1].split(",")
+    assert methods[0] == "nvdec-copy", "mpv's recommended method on Nvidia"
+    assert all(m.endswith("-copy") for m in methods), \
+        "zero-copy would hand the filter GPU surfaces"
 
 
 def test_sync_flags_prevent_the_judder_we_are_removing():

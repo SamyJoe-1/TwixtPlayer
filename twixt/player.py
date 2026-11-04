@@ -165,7 +165,11 @@ def build_args(source: detect.SourceInfo, profile: Profile, script: Path,
         # stream costs several cores in software, and those are the same cores
         # mvtools wants. Falls back to software on its own when the GPU has no
         # decoder for the codec.
-        "--hwdec=auto-copy",
+        #
+        # nvdec-copy first: mpv's manual calls nvdec/nvdec-copy "the newest,
+        # and recommended method to do hardware decoding on Nvidia GPUs".
+        # hwdec is a list option, so any other GPU falls through to auto-copy.
+        "--hwdec=nvdec-copy,auto-copy",
 
         # Resample the audio clock to the display instead of dropping/repeating
         # frames. Without this a 179.82 fps output on a 180 Hz panel judders.
@@ -327,3 +331,106 @@ def benchmark(source_path: str | Path, profile: Profile,
         "index_seconds": index_seconds,
         "overhead_seconds": overhead,
     }
+
+
+# --- live check -------------------------------------------------------------
+
+# Read straight from mpv's own bookkeeping (DOCS/man/input.rst). Nothing here
+# is estimated by twixt: these are the numbers the player itself acts on.
+_LIVE_PROPS = (
+    "frame-drop-count",          # VO dropped a frame that missed its vsync
+    "decoder-frame-drop-count",  # filter chain fell behind; decoder gave up frames
+    "mistimed-frame-count",      # display-sync had to mistime frames to keep A/V sync
+    "vo-delayed-frame-count",    # frames delayed by external causes (driver, compositor)
+)
+
+
+def _wait_for_playback(session: Session, timeout: float) -> bool:
+    """Block until mpv answers IPC and the clock is moving."""
+    deadline = time.monotonic() + timeout
+    first = None
+    while time.monotonic() < deadline:
+        if session.process.poll() is not None:
+            return False
+        pos = session.get("time-pos")
+        if isinstance(pos, (int, float)):
+            if first is None:
+                first = pos
+            elif pos > first + 0.5:
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def live_check(source_path: str | Path, profile: Profile, seconds: float = 30.0,
+               warmup: float = 6.0, start: str = "40%", fullscreen: bool = True,
+               startup_timeout: float = 900.0) -> dict:
+    """Play for real and report what mpv says actually reached the screen.
+
+    `bench`/`tune` time the filter alone through vspipe, which leaves out
+    decoding, the copy into the filter, presentation and sync -- the README's
+    own measurements show it overstating real playback. This measures the
+    whole chain, the way it is watched (fullscreen by default, since windowed
+    and fullscreen presentation differ on Windows).
+
+    Counters are read once after a warm-up (the first seconds include script
+    load and, for RIFE, TensorRT engine load) and again at the end, so only
+    steady-state playback is judged.
+    """
+    extra = [f"--start={start}", "--pause=no"]
+    if fullscreen:
+        extra.append("--fs")
+    session = launch(source_path, profile, extra)
+    try:
+        if not _wait_for_playback(session, startup_timeout):
+            raise RuntimeError("mpv did not start playing (closed, or the filter failed)")
+        time.sleep(warmup)
+
+        def snapshot() -> dict:
+            return {k: (session.get(k) or 0) for k in _LIVE_PROPS}
+
+        before = snapshot()
+        pos0, t0 = session.get("time-pos") or 0.0, time.monotonic()
+        ratios = []
+        while time.monotonic() - t0 < seconds:
+            if session.process.poll() is not None:
+                raise RuntimeError("mpv exited during the check")
+            r = session.get("vsync-ratio")
+            if isinstance(r, (int, float)):
+                ratios.append(float(r))
+            time.sleep(0.5)
+        after = snapshot()
+        wall = time.monotonic() - t0
+        pos1 = session.get("time-pos") or pos0
+
+        result = {k: int(after[k]) - int(before[k]) for k in _LIVE_PROPS}
+        result.update({
+            "seconds": wall,
+            "speed": (pos1 - pos0) / wall if wall > 0 else 0.0,
+            "output_fps": session.get("estimated-vf-fps") or 0.0,
+            "display_fps": session.get("display-fps") or 0.0,
+            "display_sync": bool(session.get("display-sync-active")),
+            "vsync_ratio": (sum(ratios) / len(ratios)) if ratios else 0.0,
+            "vsync_ratio_spread": (max(ratios) - min(ratios)) if ratios else 0.0,
+            "avsync": session.get("avsync") or 0.0,
+            "target_fps": session.target_fps,
+        })
+        drops = result["frame-drop-count"] + result["decoder-frame-drop-count"]
+        result["drops"] = drops
+        result["drops_per_min"] = drops * 60.0 / wall if wall > 0 else 0.0
+        # Smooth = nothing dropped, nothing mistimed, display sync engaged, and
+        # each frame held for a whole number of refreshes.
+        ratio = result["vsync_ratio"]
+        result["even_cadence"] = ratio > 0 and abs(ratio - round(ratio)) < 0.05
+        result["smooth"] = (drops == 0 and result["mistimed-frame-count"] == 0
+                            and result["display_sync"] and result["even_cadence"]
+                            and result["speed"] > 0.98)
+        return result
+    finally:
+        session.command("quit")
+        try:
+            session.process.wait(timeout=10)
+        except Exception:
+            session.process.kill()
+        session.script.unlink(missing_ok=True)
+        session.script.with_suffix(".conf").unlink(missing_ok=True)

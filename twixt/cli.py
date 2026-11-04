@@ -52,6 +52,8 @@ def _apply_overrides(profile: profiles.Profile, args) -> profiles.Profile:
         profile.grid = args.grid
     if args.masking:
         profile.artifact_masking = args.masking
+    if getattr(args, "threads", None):
+        profile.threads = args.threads
     if getattr(args, "no_snap", False):
         profile.snap_to_display = False
     return profile
@@ -243,61 +245,70 @@ def cmd_tune(args) -> int:
         print(f"  {DIM}mvtools only -- add --with-rife to measure the neural "
               f"backend too (slow to start){RESET}")
     print()
-    print(f"  {'backend':<9} {'grid':<8} {'target':>9} {'achieved':>10}   "
+    print(f"  {'backend':<9} {'grid/pel':<9} {'target':>8} {'achieved':>10}   "
           f"verdict    margin")
     print(f"  {'-' * 62}")
 
+    # (grid, pel) from cheapest to most accurate. MVTools2 docs: larger blocks
+    # "are faster, but also less accurate"; pel=2 is half-pixel precision,
+    # pel=1 whole pixels. Cost rises along this list, so once one fails at a
+    # rate, everything after it would fail too.
+    if args.grid:
+        ladder = [(args.grid, 1), (args.grid, 2)]
+    else:
+        ladder = [("large", 1), ("large", 2), ("medium", 1), ("medium", 2),
+                  ("small", 1), ("small", 2)]
+
+    def measure(backend, grid, pel, target):
+        profile = dataclasses.replace(base)
+        profile.backend = backend
+        profile.grid = grid
+        profile.rate_mode = "fixed"
+        profile.rate_fixed = target
+        profile.max_output_fps = display
+        profile.snap_to_display = True
+        # pel is chosen by downscale_above_height in the engine: pel=1 above
+        # that height, 2 otherwise. 0 disables the switch (always pel 2).
+        profile.downscale_above_height = 0 if pel == 2 else max(1, info.height - 1)
+        shown = f"{grid}/p{pel}" if backend == "mvtools" else "-"
+        # Say what is being measured *before* measuring it. A run can take
+        # anywhere from a second to several minutes, and a table that only
+        # fills in on completion looks identical to a hang.
+        _status(f"{backend:<9} {shown:<9} {target:>7.1f}p {'measuring...':>10}")
+        started = _time.perf_counter()
+        try:
+            r = player.benchmark(args.file, profile, frames=args.frames)
+        except RuntimeError:
+            _endstatus(f"  {backend:<9} {shown:<9} {DIM}failed{RESET}")
+            return None, profile
+        took = _time.perf_counter() - started
+        # A configuration that merely reaches the target on one sample will not
+        # survive a busy scene: motion estimation costs more where there is
+        # more motion. Demand a margin -- measured at 1.11x, a file dropped 94
+        # frames in ten seconds and drifted 125 ms out of sync.
+        r["holds"] = r["achieved_fps"] >= r["target_fps"] * args.margin
+        mark = f"{GREEN}holds{RESET}    " if r["holds"] else f"{DIM}too slow {RESET}"
+        _endstatus(f"  {backend:<9} {shown:<9} {r['target_fps']:>7.1f}p "
+                   f"{r['achieved_fps']:>9.1f}p   {mark}  "
+                   f"{DIM}{r['headroom']:.2f}x  {took:.1f}s{RESET}")
+        return r, profile
+
+    # Highest even-cadence rate first; at that rate, the most accurate setting
+    # that still holds. Smoothness is the point, so rate outranks precision.
     best = None
-    for backend in backends:
-        # Grid only affects block motion estimation; sweeping it for the
-        # neural backend would just repeat the same measurement.
-        if backend == "mvtools":
-            grids = [args.grid] if args.grid else ["large", "medium", "small"]
-        else:
-            grids = [base.grid]
-
-        for grid in grids:
-            for target in sorted(targets, reverse=True):
+    for target in sorted(targets, reverse=True):
+        for backend in backends:
+            steps = ladder if backend == "mvtools" else [(base.grid, 2)]
+            for grid, pel in steps:
+                r, profile = measure(backend, grid, pel, target)
+                if not r or not r["holds"]:
+                    break
                 multiple = target / info.fps if info.fps else 0.0
-                profile = dataclasses.replace(base)
-                profile.backend = backend
-                profile.grid = grid
-                profile.rate_mode = "fixed"
-                profile.rate_fixed = target
-                profile.max_output_fps = display
-                profile.snap_to_display = True
-                shown_grid = grid if backend == "mvtools" else "-"
-                # Say what is being measured *before* measuring it. A run can
-                # take anywhere from a second to several minutes, and a table
-                # that only fills in on completion looks identical to a hang.
-                _status(f"{backend:<9} {shown_grid:<8} {target:>8.1f}p "
-                        f"{'measuring...':>10}")
-
-                started = _time.perf_counter()
-                try:
-                    r = player.benchmark(args.file, profile, frames=args.frames)
-                except RuntimeError:
-                    _endstatus(f"  {backend:<9} {shown_grid:<8} {DIM}failed{RESET}")
-                    continue
-                took = _time.perf_counter() - started
-
-                # A configuration that merely reaches the target on one sample
-                # will not survive a busy scene: motion estimation costs more
-                # where there is more motion, and the sample is a single point
-                # in the film. Demand a margin before calling it playable --
-                # measured at 1.11x, this file dropped 94 frames in ten seconds
-                # and drifted 125 ms out of sync.
-                holds = r["achieved_fps"] >= r["target_fps"] * args.margin
-                mark = (f"{GREEN}holds{RESET}    " if holds
-                        else f"{DIM}too slow {RESET}")
-                _endstatus(f"  {backend:<9} {shown_grid:<8} {r['target_fps']:>8.1f}p "
-                           f"{r['achieved_fps']:>9.1f}p   {mark}  "
-                           f"{DIM}{r['headroom']:.2f}x  {took:.1f}s{RESET}")
-
-                if holds:
-                    if best is None or r["target_fps"] > best[0]["target_fps"]:
-                        best = (r, backend, grid, multiple, profile)
-                    break   # found this row's ceiling
+                # RIFE beats any mvtools setting on quality, so it wins a tie.
+                if best is None or backend == "rife" or best[1] != "rife":
+                    best = (r, backend, grid, multiple, profile)
+        if best:
+            break
 
     print()
     if not best:
@@ -307,7 +318,6 @@ def cmd_tune(args) -> int:
 
     r, backend, grid, multiple, winner = best
     cap = int(r["target_fps"])
-    grid_flag = f" --grid {grid}" if backend == "mvtools" else ""
 
     # Write the winning settings out, so the answer is a file you can reuse
     # rather than a command line to retype for every file.
@@ -326,14 +336,103 @@ def cmd_tune(args) -> int:
     print(f"  {BOLD}best: {r['target_fps']:.1f} fps ({multiple:.2f}x source) "
           f"on {backend}{RESET}")
     print(f"  {DIM}headroom {r['headroom']:.2f}x   saved to {out}{RESET}\n")
-    print("  play this file:")
-    print(f"    {BOLD}python -m twixt play \"{args.file}\" --backend {backend}"
-          f"{grid_flag} --cap {cap}{RESET}")
-    print("  or reuse the tuned settings on anything:")
-    print(f"    {BOLD}python -m twixt play \"<file>\" --profile {out}{RESET}\n")
+    print("  play with exactly the measured settings (grid, pel, rate):")
+    print(f"    {BOLD}python -m twixt play \"{args.file}\" --profile {out}{RESET}")
+    print(f"  {DIM}then confirm on screen:  python -m twixt check \"{args.file}\" "
+          f"--profile {out}{RESET}\n")
     print(f"  {DIM}measured {r['headroom']:.2f}x the target against a required "
           f"{args.margin:g}x. If it still stutters, re-run with a higher "
           f"--margin.{RESET}\n")
+    return 0
+
+
+def _check_row(r: dict) -> str:
+    verdict = f"{GREEN}smooth{RESET}" if r["smooth"] else f"{RED}not smooth{RESET}"
+    return (f"  {r['target_fps']:>6.1f}  {r['output_fps']:>7.1f}  {r['vsync_ratio']:>5.2f}"
+            f"  {r['drops']:>5d}  {r['mistimed-frame-count']:>8d}  {r['vo-delayed-frame-count']:>7d}"
+            f"  {r['speed']:>5.2f}   {verdict}")
+
+
+def _check_reasons(r: dict) -> list[str]:
+    why = []
+    if r["drops"]:
+        why.append(f"{r['drops']} frames dropped ({r['drops_per_min']:.0f}/min): "
+                   "the filter cannot hold this rate")
+    if not r["display_sync"]:
+        why.append("display sync not active: mpv fell back to audio timing "
+                   "(rate not within 1% of a refresh multiple, or the window was disturbed)")
+    if r["vsync_ratio"] and not r["even_cadence"]:
+        why.append(f"frames held {r['vsync_ratio']:.2f} refreshes on average, not a whole "
+                   "number: uneven cadence (judder)")
+    if r["mistimed-frame-count"]:
+        why.append(f"{r['mistimed-frame-count']} frames mistimed to keep A/V sync")
+    if r["vo-delayed-frame-count"]:
+        why.append(f"{r['vo-delayed-frame-count']} frames delayed by the driver/compositor "
+                   "(try true fullscreen, close overlays)")
+    return why
+
+
+def cmd_check(args) -> int:
+    """Real playback, judged by mpv's own counters, not a vspipe estimate."""
+    base = _apply_overrides(profiles.get(args.profile), args)
+    source = Path(args.file)
+    if not source.is_file():
+        print(f"{RED}no such file:{RESET} {source}", file=sys.stderr)
+        return 2
+    display = detect.display_refresh_hz()
+    info = detect.probe(source)
+
+    if args.auto:
+        targets = [display / k for k in range(1, 9) if display / k >= info.fps * 1.5]
+    else:
+        targets = [base.resolve_target_fps(info.fps, display)]
+
+    print(f"\n  live check: {source.name}  {DIM}{info.width}x{info.height} "
+          f"{info.fps:.3f} fps on a {display:g} Hz panel, {base.backend}, "
+          f"{args.seconds:g}s per rate from {args.start}{RESET}")
+    print(f"  {DIM}plays for real{' fullscreen' if not args.windowed else ''}; "
+          f"don't touch the window while it measures{RESET}\n")
+    print(f"  {'target':>6}  {'out fps':>7}  {'held':>5}  {'drops':>5}  {'mistimed':>8}"
+          f"  {'delayed':>7}  {'speed':>5}   verdict")
+    print(f"  {'-' * 70}")
+
+    best = None
+    for target in sorted(targets, reverse=True):
+        profile = dataclasses.replace(base)
+        profile.rate_mode, profile.rate_fixed = "fixed", target
+        profile.max_output_fps = max(target, 1.0)
+        profile.snap_to_display = True
+        _status(f"{target:>6.1f}  playing...")
+        try:
+            r = player.live_check(source, profile, seconds=args.seconds,
+                                  start=args.start, fullscreen=not args.windowed)
+        except RuntimeError as exc:
+            _endstatus(f"  {target:>6.1f}  {RED}failed: {exc}{RESET}")
+            continue
+        _endstatus(_check_row(r))
+        for why in _check_reasons(r):
+            print(f"          {DIM}- {why}{RESET}")
+        if r["smooth"]:
+            best = (target, profile, r)
+            break   # highest smooth rate found
+
+    print()
+    if not best:
+        print(f"  {RED}No rate played smoothly.{RESET} With mvtools try "
+              f"--grid large; for RIFE run `twixt tune --backend rife` first.\n")
+        return 1
+    target, profile, r = best
+    if args.auto:
+        profile.name = f"checked {info.width}x{info.height} @ {target:g}fps ({profile.backend})"
+        profile.description = (f"live check on this machine: 0 drops over {r['seconds']:.0f}s, "
+                               f"each frame held {r['vsync_ratio']:.2f} refreshes on a "
+                               f"{display:g} Hz panel")
+        out = Path(args.output) if args.output else Path("twixt-checked.json")
+        profile.save(out)
+        print(f"  {BOLD}best smooth rate: {target:g} fps{RESET}  {DIM}saved to {out}{RESET}")
+        print(f"    {BOLD}python -m twixt play \"<file>\" --profile {out}{RESET}\n")
+    else:
+        print(f"  {GREEN}smooth at {target:g} fps{RESET}\n")
     return 0
 
 
@@ -374,6 +473,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--grid", choices=["small", "medium", "large"])
         sp.add_argument("--masking",
                         choices=["disabled", "weak", "average", "strong"])
+        sp.add_argument("--threads", type=int,
+                        help="frames kept in flight through the filter "
+                             "(default: all cores for mvtools, 3 per stream for RIFE)")
         sp.add_argument("--no-snap", action="store_true",
                         help="use the exact rate asked for even if the panel "
                              "cannot show it evenly (e.g. 120 fps on 180 Hz)")
@@ -416,6 +518,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_tune.add_argument("-o", "--output", help="where to save the winning "
                                                "profile (default twixt-tuned.json)")
     p_tune.set_defaults(func=cmd_tune)
+
+    p_check = sub.add_parser(
+        "check", help="play for real and judge smoothness from mpv's own counters")
+    p_check.add_argument("file")
+    add_common(p_check)
+    p_check.add_argument("--auto", action="store_true",
+                         help="try display/1, /2, /3... and save the highest smooth rate")
+    p_check.add_argument("-s", "--seconds", type=float, default=30.0,
+                         help="measured seconds per rate (after a warm-up)")
+    p_check.add_argument("--start", default="40%",
+                         help="where to start, mpv syntax (40%%, 01:10:00)")
+    p_check.add_argument("--windowed", action="store_true",
+                         help="measure in a window instead of fullscreen")
+    p_check.add_argument("-o", "--output", help="where --auto saves the result")
+    p_check.set_defaults(func=cmd_check)
 
     p_mpc = sub.add_parser("install-mpchc",
                            help="EXPERIMENTAL: MPC-HC integration (does not work yet, see README)")

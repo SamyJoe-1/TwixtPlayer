@@ -114,6 +114,35 @@ builds a TensorRT engine, which takes minutes once. Re-run `bootstrap.ps1` so th
 `akarin` plugin is installed. Without it, scene-cut selection falls back to a
 Python callback.
 
+### Round 2: measuring what you actually see
+
+- **`twixt check`** plays the file for real (fullscreen) and judges it from
+  mpv's own counters: dropped frames, mistimed frames, delayed frames,
+  playback speed, and `vsync-ratio`, the number of refreshes each frame
+  is held. 2.00 at 90 fps on 180 Hz is perfect. 1.50 is the 120-on-180 judder.
+  `--auto` tries 180, then 90, then 60, and saves the highest rate that plays with zero drops:
+
+  ```bash
+  python -m twixt check "film.mkv" --profile twixt-1440p.json --auto
+  ```
+
+  `tune` (vspipe, filter only) is an estimate. `check` is the real result.
+- **`tune` picks quality too.** At each even-cadence rate it climbs from
+  cheapest to most accurate (`large` to `small` blocks, whole-pixel to
+  half-pixel vectors) and keeps the best setting that still holds. Before,
+  it stopped at the first rate that held and kept the coarsest grid.
+- **Hardware decoding uses `nvdec-copy`**, which mpv's manual calls the recommended method on
+  Nvidia. Other GPUs fall back to `auto-copy`.
+- **RIFE's scene-cut detector runs on a 960 px copy.** It only outputs a
+  per-frame cut flag, so the full 1440p motion search was wasted CPU.
+- `--threads N` overrides how many frames are in flight through the filter,
+  so you can test it with `check`.
+
+**Known limit: seeking.** mpv rebuilds the VapourSynth core on every seek
+(`vf_vapoursynth_reset` → `destroy_vs` in mpv's source), so with RIFE the
+TensorRT engine reloads after each jump. That pause after a seek comes
+from the player, and the script cannot keep the engine across it.
+
 ## Install
 
 ```powershell
